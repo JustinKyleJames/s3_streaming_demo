@@ -1107,29 +1107,23 @@ printf("%s:%d (%s) [thread=%u] wrote to ring_buffer\n", __FILE__, __LINE__, __FU
 } // end s3FileWrite
 
 // emulates the irods behavior of taking an existing list of character buffers and sending them to the plugin
-void irods_emulator(unsigned int thread_number, std::vector<char*> *char_buffers_ptr, std::vector<size_t> *char_buffer_sizes_ptr, S3BucketContext *bucket_context_ptr) {
+void irods_emulator(unsigned int thread_number, std::vector<char*> *char_buffers_ptr, std::vector<size_t> *char_buffer_sizes_ptr, S3BucketContext *bucket_context_ptr, size_t file_size, size_t thread_count) {
 
 printf("%s:%d (%s) [thread=%u] starting irods_emulator\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
 
+    // thread in irods only deal with sequential bytes.  figure out what bytes this thread deals with
+    size_t start = thread_number * (file_size / thread_count);
+    size_t end = (thread_number+1) * (file_size / thread_count);
 
-    // pick off a buffer until all have been written and send to s3FileWrite
-    while (1) {
+printf("%s:%d (%s) [thread=%u] [start=%ld][end=%ld]\n", __FILE__, __LINE__, __FUNCTION__, thread_number, start, end);
 
-        unsigned int cntr; 
-        cntr = std::atomic_fetch_add(&current_buffer_counter, static_cast<unsigned int>(1));
-        
-printf("%s:%d (%s) [thread=%u] [cntr=%u][char_buffers_ptr->size=%lu]\n", __FILE__, __LINE__, __FUNCTION__, thread_number, cntr, char_buffers_ptr->size());
-        if (cntr >= char_buffers_ptr->size()) {
-            // we have done reading all the character buffers.  break out. 
-            break;
+    // iterate through the byte pointers and only send the ones that are in my range
+    size_t offset = 0;
+    for (unsigned int cntr = 0; cntr < char_buffers_ptr->size(); ++cntr) {
+        if (offset >= start && offset < end) {
+            s3FileWrite((*char_buffers_ptr)[cntr], (*char_buffer_sizes_ptr)[cntr], offset, bucket_context_ptr, thread_number);
         }
-
-        // char_buffer[0] will always be the the max buffer size unless the 
-        // file size < max buffer size in which case cntr will be zero
-        off_t offset = cntr * (*char_buffer_sizes_ptr)[0];
-
-printf("%s:%d (%s) [thread=%u] calling s3FileWrite\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
-        s3FileWrite((*char_buffers_ptr)[cntr], (*char_buffer_sizes_ptr)[cntr], offset, bucket_context_ptr, thread_number);
+        offset += (*char_buffer_sizes_ptr)[cntr]; 
     }
 
 
@@ -1243,7 +1237,7 @@ printf("%s:%d (%s) thread_count=%zu\n", __FILE__, __LINE__, __FUNCTION__, thread
 
     for (unsigned int thread_number = 0; thread_number <  thread_count; ++thread_number) {
         printf("%s:%d (%s) start thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
-        writer_threads[thread_number] = std::thread(irods_emulator, thread_number, &char_buffers, &char_buffer_sizes, &bucket_context);  // note:  move assignment
+        writer_threads[thread_number] = std::thread(irods_emulator, thread_number, &char_buffers, &char_buffer_sizes, &bucket_context, file_size, thread_count);  // note:  move assignment
     }
 
     // this is just irods waiting for s3FileWrite to finish on all writes and then deleting the threads
@@ -1257,6 +1251,7 @@ printf("%s:%d (%s) thread_count=%zu\n", __FILE__, __LINE__, __FUNCTION__, thread
 
     printf("%s:%d (%s) done parallel part\n", __FILE__, __LINE__, __FUNCTION__);
 
+fflush(stdout);
     // THIS PART IS DONE ONCE AT END (s3FileClose) 
 
     for (unsigned int thread_number = 0; thread_number <  thread_count; ++thread_number) {
