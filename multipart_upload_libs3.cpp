@@ -11,6 +11,7 @@
 #include <fstream>
 #include <thread>
 #include <atomic>
+#include <mutex>
 
 
 // boost includes
@@ -65,7 +66,7 @@ namespace irods
 } // end namespace irods
 
 
-const long transfer_buffer_size_for_parallel_transfer_in_megabytes = 8;
+const long transfer_buffer_size_for_parallel_transfer_in_megabytes = 4;
 thread_local int thread_nbr;
 
 const long long S3_GET_ERROR = 1;
@@ -81,7 +82,6 @@ typedef __int64_t rodsLong_t;
 
 // individual request
 struct upload_page_t {
-   //uint8_t *buffer;
    char *buffer;
    size_t buffer_size;
    off_t offset_of_buffer;     // offset of buffer within the file         
@@ -91,6 +91,7 @@ struct upload_page_t {
 std::atomic<unsigned int> current_buffer_counter;
 
 // maps the irods thread number to the reader thread 
+std::mutex ring_buffer_maps_mutex;
 std::map<int, std::thread*> ring_buffer_reader_thread_map;
 std::map<int, irods::ring_buffer<upload_page_t>*> ring_buffer_instance_map; 
 
@@ -111,14 +112,13 @@ typedef struct s3Stat
 
 typedef struct callback_data
 {
-    // jjames - changed this to just have the data pointer and buffer_size in callback_data_t since we don't have a cache file
+    // a page is read from the ring_buffer and placed in bytes 
     char *bytes;
     size_t buffer_size;
-    
-   //irods::ring_buffer<upload_page_t> *ring_buffer_instance_ptr;
-    
-    //int fd;
-    long offset;       /* For multiple upload */
+    irods::ring_buffer<upload_page_t> *ring_buffer_instance_ptr;
+   
+    // this is total offset in the file 
+    //long offset;       /* For multiple upload */
     rodsLong_t contentLength, originalContentLength;
     S3Status status;
     int keyCount;
@@ -325,42 +325,33 @@ S3Status responsePropertiesCallback(
 {
     // Here we are saving the only 2 things iRODS actually cares about.
     savedProperties.lastModified = properties->lastModified;
+printf("%s:%d (%s) [thread=%d] set contentLength to %lu\n", __FILE__, __LINE__, __FUNCTION__, thread_nbr, properties->contentLength);
     savedProperties.contentLength = properties->contentLength;
     return S3StatusOK;
 } // end responsePropertiesCallback
 
-static S3Status getObjectDataCallback(
-    int bufferSize,
-    const char *buffer,
-    void *callbackData)
-{
-    callback_data_t *cb = (callback_data_t *)callbackData;
-    std::string resource_name = "";
-
-    if (bufferSize != 0 && buffer != NULL && callbackData != NULL) {
-        printf("Invalid input parameter\n");
-    }
-
-    // TODO
-    ssize_t wrote = 0; //pwrite(cb->fd, buffer, bufferSize, cb->offset);
-    if (wrote>0) cb->offset += wrote;
-
-    printf("DEBUG [wrote=%zd][bufferSize=%d]\n", wrote, bufferSize);
-    return ((wrote < (ssize_t) bufferSize) ?
-            S3StatusAbortedByCallback : S3StatusOK);
-}  // end getObjectDataCallback 
-
 static int putObjectDataCallback(
-    int bufferSize,
-    char *buffer,
+    int libs3_buffer_size,
+    char *libs3_buffer,
     void *callbackData)
 {
-    // TODO data->bytes must be a list of pointers not just a pointer
-    // when we get a new chunk (s3FileWrite) we must add this to the list
-    // when we have exhausted one list move on to the next
-    // data->offset is the offset within the buffer
+    // keep reading a bufferSize bytes from buffer.
+    // if buffer is empty, get another from the ring_buffer
     callback_data_t *data = (callback_data_t *) callbackData;
-    long ret = 0;
+    irods::ring_buffer<upload_page_t> *ring_buffer_instance_ptr = data->ring_buffer_instance_ptr;
+
+    // if we've exhausted our current buffer, read the next buffer from the ring_buffer
+    if (data->buffer_size == 0) {
+        upload_page_t page;
+        ring_buffer_instance_ptr->read(page);
+
+        // if we get a terminate there are no more bytes to be read
+        if (page.terminate_flag) {
+            return 0;
+        }
+        data->bytes = page.buffer;
+        data->buffer_size = page.buffer_size;
+    }
 
     int length = 0;
 
@@ -369,28 +360,24 @@ static int putObjectDataCallback(
         // bufferSize is the size of *buffer provided by libs3
         // data->buffer_size is the size of data->bytes we set up
 
-        length = bufferSize > data->buffer_size ? data->buffer_size : bufferSize;
+        length = libs3_buffer_size > data->buffer_size ? data->buffer_size : libs3_buffer_size;
 
 
-printf("%s:%d (%s) [thread=%d] bufferSize=%d data->buffer_size=%zu data->offset=%lu length=%d\n", __FILE__, __LINE__, __FUNCTION__, thread_nbr, bufferSize, data->buffer_size, data->offset, length);
+printf("%s:%d (%s) [thread=%d] libs3_buffer_size=%d data->buffer_size=%zu length=%d\n", __FILE__, __LINE__, __FUNCTION__, thread_nbr, libs3_buffer_size, data->buffer_size, length);
 fflush(stdout);
 
-        //length = ((data->contentLength > (unsigned) bufferSize) ?
-        //              (unsigned) bufferSize : data->contentLength);
-
         //memcpy(buffer, &(data->bytes[data->offset]), length);
-        //memcpy(buffer, &(data->bytes) + data->offset, length);
+        //memcpy(libs3_buffer, &(data->bytes), length);
         for (size_t i = 0; i < length; ++i) {
-            buffer[i] = data->bytes[i];
+            libs3_buffer[i] = data->bytes[i];
         }
 
         //ret = pread(data->fd, buffer, length, data->offset);
     }
     data->buffer_size -= length;
-    data->offset += length;
     data->bytes += length;
 
-    return (long)length;
+    return length;
 } // end putObjectDataCallback
 
 
@@ -430,108 +417,6 @@ static volatile int g_mrdNext = 0;
 static int g_mrdLast = -1;
 static multirange_data_t *g_mrdData = NULL;
 static const char *g_mrdKey = NULL;
-
-static S3Status mrdRangeGetDataCB (
-    int bufferSize,
-    const char *buffer,
-    void *callbackData)
-{
-    multirange_data_t *data = (multirange_data_t*)callbackData;
-    return getObjectDataCallback( bufferSize, buffer, &(data->get_object_data) );
-} // end mrdRangeGetDataCB
-
-static S3Status mrdRangeRespPropCB (
-    const S3ResponseProperties *properties,
-    void *callbackData)
-{
-    // Don't need to do anything here
-    return S3StatusOK;
-} // end mrdRangeRespPropCB
-
-static void mrdRangeRespCompCB (
-    S3Status status,
-    const S3ErrorDetails *error,
-    void *callbackData)
-{
-    multirange_data_t *data = (multirange_data_t*)callbackData;
-    StoreAndLogStatus( status, error, __FUNCTION__, data->pCtx, &(data->status) );
-    // Don't change the global error, we may want to retry at a higher level.
-    // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
-} // end mrdRangeRespCompCB
-
-
-/*static void mrdWorkerThread (void *bucketContextParam, void *pluginPropertyMapParam)
-{
-    S3BucketContext bucketContext = *((S3BucketContext*)bucketContextParam);
-
-    std::string resource_name = get_resource_name();
-
-    irods::error result;
-    std::stringstream msg;
-    S3GetObjectHandler getObjectHandler = { {mrdRangeRespPropCB, mrdRangeRespCompCB }, mrdRangeGetDataCB };
-
-    size_t retry_count_limit = S3_DEFAULT_RETRY_COUNT;
-    size_t retry_wait = S3_DEFAULT_RETRY_WAIT_SEC;
-
-    // Will break out when no work detected 
-    while (1) {
-        // Pointer is probably safe w/o mutex, but JIK...
-        g_mrdLock.lock();
-        bool ok = (g_mrdResult.ok());
-        g_mrdLock.unlock();
-        if (!ok) break;
-
-        int seq;
-        g_mrdLock.lock();
-        if (g_mrdNext >= g_mrdLast) {
-            g_mrdLock.unlock();
-            break;
-        }
-        seq = g_mrdNext + 1;
-        g_mrdNext++;
-        g_mrdLock.unlock();
-
-        size_t retry_cnt = 0;
-        multirange_data_t rangeData;
-        do {
-            // Work on a local copy of the structure in case an error occurs in the middle
-            // of an upload.  If we updated in-place, on a retry the part would start
-            // at the wrong offset and length.
-            rangeData = g_mrdData[seq-1];
-            rangeData.pCtx = &bucketContext;
-
-            msg.str( std::string() ); // Clear
-            msg << "Multirange:  Start range " << (int)seq << ", key \"" << g_mrdKey << "\", offset "
-                << (long)rangeData.get_object_data.offset << ", len " << (int)rangeData.get_object_data.contentLength;
-            printf( msg.str().c_str() );
-
-            unsigned long long usStart = usNow();
-            std::string hostname = s3GetHostname();
-            bucketContext.hostName = hostname.c_str(); 
-            S3_get_object( &bucketContext, g_mrdKey, NULL, rangeData.get_object_data.offset,
-                           rangeData.get_object_data.contentLength, 0, &getObjectHandler, &rangeData );
-            unsigned long long usEnd = usNow();
-            double bw = (g_mrdData[seq-1].get_object_data.contentLength / (1024.0*1024.0)) / ( (usEnd - usStart) / 1000000.0 );
-            msg << " -- END -- BW=" << bw << " MB/s";
-            printf( msg.str().c_str() );
-            if (rangeData.status != S3StatusOK) s3_sleep( retry_wait, 0 );
-        } while ((rangeData.status != S3StatusOK) && S3_status_is_retryable(rangeData.status) && (++retry_cnt < retry_count_limit));
-        if (rangeData.status != S3StatusOK) {
-            msg.str( std::string() ); // Clear
-            msg << "[resource_name=" << resource_name << "] " << __FUNCTION__ 
-                << " - Error getting the S3 object: \"" << g_mrdKey << "\" range " << seq;
-            if (rangeData.status >= 0) {
-                msg << " - \"" << S3_get_status_name( rangeData.status ) << "\"";
-            }
-            result = ERROR( S3_GET_ERROR, msg.str() );
-            printf( msg.str().c_str() );
-            g_mrdLock.lock();
-            g_mrdResult = result;
-            g_mrdLock.unlock();
-        }
-    }
-}*/
-
 
 S3STSDate s3GetSTSDate()
 {
@@ -727,107 +612,113 @@ static void mpuCancel( S3BucketContext *bucketContext, const char *key, const ch
 } // end mpuCancel
 
 
+
 /* Multipart worker thread, grabs a job from the queue and uploads it */
-static void mpuWorkerThread(void *bucketContextParam, int thread_number)
+static void mpuWorkerThread(void *bucketContextParam, int thread_number, int thread_count, size_t file_size)
 {
     thread_nbr = thread_number;
 
-printf("%s:%d (%s) [thread=%d] mpuWorkerThread ran\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
-
     S3BucketContext bucketContext = *((S3BucketContext*)bucketContextParam);
 
-    irods::ring_buffer<upload_page_t> *ring_buffer_instance_ptr = ring_buffer_instance_map[thread_number];
+    irods::ring_buffer<upload_page_t> *ring_buffer_instance_ptr = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(ring_buffer_maps_mutex);
+        ring_buffer_instance_ptr = ring_buffer_instance_map[thread_number];
+    }
 
-    while (true) {
+    int seq = thread_number + 1;
 
-        upload_page_t page;
+    upload_page_t page;
 
-        // blocks until it can read
-printf("%s:%d (%s) [thread=%d] waiting to read\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
-        ring_buffer_instance_ptr->read(page);
+    // read the first page
+printf("%s:%d (%s) [thread=%d] waiting to read [seq=%d]\n", __FILE__, __LINE__, __FUNCTION__, thread_number, seq);
+    ring_buffer_instance_ptr->read(page);
 
 
 printf("%s:%d (%s) [thread=%d] read page [buffer=%p][buffer_size=%zu][terminate_flag=%d][offset=%ld]\n", __FILE__, __LINE__, __FUNCTION__, thread_number, page.buffer, page.buffer_size, page.terminate_flag, page.offset_of_buffer);
 
-        // if we get a terminate flag, we're done
-        if (page.terminate_flag) {
-            return;
+    std::string resource_name = get_resource_name();
+
+    irods::error result;
+    std::stringstream msg;
+    S3PutObjectHandler putObjectHandler = { {mpuPartRespPropCB, mpuPartRespCompCB }, &mpuPartPutDataCB };
+
+    size_t retry_count_limit = S3_DEFAULT_RETRY_COUNT;
+    size_t retry_wait = S3_DEFAULT_RETRY_WAIT_SEC;
+
+    multipart_data_t partData{};
+    
+    size_t retry_cnt = 0;
+    do {
+        // Work on a local copy of the structure in case an error occurs in the middle
+        // of an upload.  If we updated in-place, on a retry the part would start
+        // at the wrong offset and length.
+        partData = g_mpuData[thread_number];
+        partData.seq = seq;
+        partData.put_object_data.pCtx = &bucketContext;
+        partData.put_object_data.bytes = page.buffer;
+        partData.put_object_data.buffer_size = page.buffer_size;
+        partData.put_object_data.ring_buffer_instance_ptr = ring_buffer_instance_ptr;
+
+        // Each part is floor(file_size/thread_count) long.  The last thread has the extra bytes.
+        if (thread_number == thread_count -1) {
+            partData.put_object_data.contentLength = file_size - (thread_count-1) * (file_size / thread_count);
+        } else {
+            partData.put_object_data.contentLength = file_size / thread_count;
         }
 
-        std::string resource_name = get_resource_name();
-    
-        irods::error result;
-        std::stringstream msg;
-        S3PutObjectHandler putObjectHandler = { {mpuPartRespPropCB, mpuPartRespCompCB }, &mpuPartPutDataCB };
-    
-        size_t retry_count_limit = S3_DEFAULT_RETRY_COUNT;
-        size_t retry_wait = S3_DEFAULT_RETRY_WAIT_SEC;
-   
-   
-        // TODO determine the sequence 
-        int seq = page.offset_of_buffer / (transfer_buffer_size_for_parallel_transfer_in_megabytes*1024*1024) + 1;
+printf("%s:%d (%s) DEBUG [thread=%d] [contentLength=%ld]\n", __FILE__, __LINE__, __FUNCTION__, thread_number, partData.put_object_data.contentLength);
 
-        multipart_data_t partData{};
-        
-        size_t retry_cnt = 0;
-        do {
-            // Work on a local copy of the structure in case an error occurs in the middle
-            // of an upload.  If we updated in-place, on a retry the part would start
-            // at the wrong offset and length.
-            partData = g_mpuData[seq-1];
-            partData.put_object_data.pCtx = &bucketContext;
-            partData.put_object_data.bytes = page.buffer;
-            partData.put_object_data.buffer_size = page.buffer_size;
-            partData.put_object_data.offset = 0;
+        msg.str( std::string() ); // Clear
+        msg << "Multipart:  Start part " << (int)seq << ", key \"" << g_mpuKey << "\", uploadid \"" << g_mpuUploadId << 
+            ", len " << (int)partData.put_object_data.contentLength;
+        printf( "%s:%d (%s) [thread=%u] %s\n", __FILE__, __LINE__, __FUNCTION__, thread_number, msg.str().c_str() );
+        msg.str( std::string() ); // Clear
 
-            msg.str( std::string() ); // Clear
-            msg << "Multipart:  Start part " << (int)seq << ", key \"" << g_mpuKey << "\", uploadid \"" << g_mpuUploadId << "\", offset "
-                << (long)partData.put_object_data.offset << ", len " << (int)partData.put_object_data.contentLength;
-            printf( "%s:%d (%s) [thread=%u] %s\n", __FILE__, __LINE__, __FUNCTION__, thread_number, msg.str().c_str() );
-            msg.str( std::string() ); // Clear
-    
-            S3PutProperties *putProps = NULL;
-            putProps = (S3PutProperties*)calloc( sizeof(S3PutProperties), 1 );
-            putProps->md5 = nullptr;
-            if ( putProps && partData.enable_md5 ) {
-                // jjames - not sure how to do MD5 piecewise 
-                //putProps->md5 = s3CalcMD5( partData.put_object_data.fd, partData.put_object_data.offset, partData.put_object_data.contentLength, resource_name );
-            }
-            putProps->expires = -1;
-            unsigned long long usStart = usNow();
-            std::string hostname = s3GetHostname();
-            bucketContext.hostName = hostname.c_str(); 
-    
-            partData.put_object_data.bytes = page.buffer;
-            partData.put_object_data.buffer_size = page.buffer_size;
-   
-            //S3_upload_part(&bucketContext, g_mpuKey, putProps, &putObjectHandler, seq, g_mpuUploadId, partData.put_object_data.contentLength, 0, &partData);
-            S3_upload_part(&bucketContext, g_mpuKey, putProps, &putObjectHandler, seq, g_mpuUploadId, partData.put_object_data.contentLength, 0, &partData);
+        S3PutProperties *putProps = NULL;
+        putProps = (S3PutProperties*)calloc( sizeof(S3PutProperties), 1 );
+        putProps->md5 = nullptr;
+        if ( putProps && partData.enable_md5 ) {
+            // jjames - not sure how to do MD5 piecewise 
+            //putProps->md5 = s3CalcMD5( partData.put_object_data.fd, partData.put_object_data.offset, partData.put_object_data.contentLength, resource_name );
+        }
+        putProps->expires = -1;
+        unsigned long long usStart = usNow();
+        std::string hostname = s3GetHostname();
+        bucketContext.hostName = hostname.c_str(); 
+
+        partData.put_object_data.bytes = page.buffer;
+        partData.put_object_data.buffer_size = page.buffer_size;
+
+        //S3_upload_part(&bucketContext, g_mpuKey, putProps, &putObjectHandler, seq, g_mpuUploadId, partData.put_object_data.contentLength, 0, &partData);
+printf("%s:%d (%s) [thread=%d] S3_upload_part (ctx, key, props, handler, %d, uploadId, %ld, 0, partData)\n", __FILE__, __LINE__, __FUNCTION__, thread_number, seq, partData.put_object_data.contentLength);
+        S3_upload_part(&bucketContext, g_mpuKey, putProps, &putObjectHandler, seq, g_mpuUploadId, partData.put_object_data.contentLength, 0, &partData);
 printf("%s:%d (%s) [thread=%d] S3_upload_part returned\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
 
 
-            unsigned long long usEnd = usNow();
-            double bw = (g_mpuData[seq-1].put_object_data.contentLength / (1024.0 * 1024.0)) / ( (usEnd - usStart) / 1000000.0 );
-            // Clear up the S3PutProperties, if it exists
-            if (putProps) {
-                if (putProps->md5) free( (char*)putProps->md5 );
-                free( putProps );
-            }
-            msg << "Multipart:  -- END -- BW=" << bw << " MB/s";
-            printf( "%s:%d (%s) [thread=%u] %s\n", __FILE__, __LINE__, __FUNCTION__, thread_number, msg.str().c_str() );
-            if (partData.status != S3StatusOK) s3_sleep( retry_wait, 0 );
-        } while ((partData.status != S3StatusOK) && S3_status_is_retryable(partData.status) && (++retry_cnt < retry_count_limit));
-        if (partData.status != S3StatusOK) {
-            msg.str( std::string() ); // Clear
-            msg << "[resource_name=" << resource_name << "] " << __FUNCTION__ << " - Error putting the S3 object: \"" << g_mpuKey << "\"" << " part " << seq;
-            if(partData.status >= 0) {
-                msg << " - \"" << S3_get_status_name(partData.status) << "\"";
-            }
-            result = ERROR( S3_PUT_ERROR, msg.str() );
-            printf( "%s:%d (%s) [thread=%u] %s\n", __FILE__, __LINE__, __FUNCTION__, thread_number, msg.str().c_str() );
-            g_mpuResult = result;
+        unsigned long long usEnd = usNow();
+        double bw = (g_mpuData[seq-1].put_object_data.contentLength / (1024.0 * 1024.0)) / ( (usEnd - usStart) / 1000000.0 );
+        // Clear up the S3PutProperties, if it exists
+        if (putProps) {
+            if (putProps->md5) free( (char*)putProps->md5 );
+            free( putProps );
         }
+        msg << "Multipart:  -- END -- BW=" << bw << " MB/s";
+        printf( "%s:%d (%s) [thread=%u] %s\n", __FILE__, __LINE__, __FUNCTION__, thread_number, msg.str().c_str() );
+        if (partData.status != S3StatusOK) s3_sleep( retry_wait, 0 );
+    } while ((partData.status != S3StatusOK) && S3_status_is_retryable(partData.status) && (++retry_cnt < retry_count_limit));
+    if (partData.status != S3StatusOK) {
+        msg.str( std::string() ); // Clear
+        msg << "[resource_name=" << resource_name << "] " << __FUNCTION__ << " - Error putting the S3 object: \"" << g_mpuKey << "\"" << " part " << seq;
+        if(partData.status >= 0) {
+            msg << " - \"" << S3_get_status_name(partData.status) << "\"";
+        }
+        result = ERROR( S3_PUT_ERROR, msg.str() );
+        printf( "%s:%d (%s) [thread=%u] %s\n", __FILE__, __LINE__, __FUNCTION__, thread_number, msg.str().c_str() );
+        g_mpuResult = result;
     }
+
+
 } // end mpuWorkerThread
 
 
@@ -835,7 +726,8 @@ irods::error initialize_multipart_upload(
     const std::string& _filename,
     const std::string& _object_key,
     size_t _fileSize,
-    size_t chunksize,
+    size_t chunksize,      // multipart size
+    size_t thread_count,
     const std::string& _key_id,
     const std::string& _access_key,
     const std::string& _bucket,
@@ -890,22 +782,22 @@ irods::error initialize_multipart_upload(
     msg.str( std::string() ); // Clear
 
     long seq;
-    //long totalSeq = (_fileSize + chunksize - 1) / chunksize;
+    size_t total_parts = thread_count;
     
-    // TODO for now the parallel part size is the buffer size in iRODS
-    // TODO in future make this larger (read multiple buffers if available)
-    long totalSeq = (_fileSize + transfer_buffer_size_for_parallel_transfer_in_megabytes*1024*1024 - 1) / (transfer_buffer_size_for_parallel_transfer_in_megabytes*1024*1024);
-printf("%s:%d (%s) totalSeq=%ld\n", __FILE__, __LINE__, __FUNCTION__, totalSeq);
+
+//printf("%s:%d (%s) totalSeq=%ld\n", __FILE__, __LINE__, __FUNCTION__, totalSeq);
+printf("%s:%d (%s) total_parts=%ld\n", __FILE__, __LINE__, __FUNCTION__, total_parts);
 
     multipart_data_t partData;
     int partContentLength = 0;
 
     bzero (&data, sizeof (data));
     //datajjames - .fd = cache_fd;
+printf("%s:%d (%s) [thread=%d] set contentLength to %zu\n", __FILE__, __LINE__, __FUNCTION__, thread_nbr, _fileSize);
     data.contentLength = data.originalContentLength = _fileSize;
 
     // Allocate all dynamic storage now, so we don't start a job we can't finish later
-    manager.etags = (char**)calloc(sizeof(char*) * totalSeq, 1);
+    manager.etags = (char**)calloc(sizeof(char*) * total_parts, 1);
     if (!manager.etags) {
         // Clear up the S3PutProperties, if it exists
         if (putProps) {
@@ -917,7 +809,7 @@ printf("%s:%d (%s) totalSeq=%ld\n", __FILE__, __LINE__, __FUNCTION__, totalSeq);
         result = ERROR( SYS_MALLOC_ERR, msg.c_str() );
         return result;
     }
-    g_mpuData = (multipart_data_t*)calloc(totalSeq, sizeof(multipart_data_t));
+    g_mpuData = (multipart_data_t*)calloc(total_parts, sizeof(multipart_data_t));
     if (!g_mpuData) {
         // Clear up the S3PutProperties, if it exists
         if (putProps) {
@@ -931,7 +823,7 @@ printf("%s:%d (%s) totalSeq=%ld\n", __FILE__, __LINE__, __FUNCTION__, totalSeq);
         return result;
     }
     // Maximum XML completion length with extra space for the <complete...></complete...> tag
-    manager.xml = (char *)malloc((totalSeq+2) * 256);
+    manager.xml = (char *)malloc((total_parts+2) * 256);
     if (manager.xml == NULL) {
         // Clear up the S3PutProperties, if it exists
         if (putProps) {
@@ -973,22 +865,23 @@ printf("%s:%d (%s) totalSeq=%ld\n", __FILE__, __LINE__, __FUNCTION__, totalSeq);
     }
 
     g_mpuNext = 0;
-    g_mpuLast = totalSeq;
+    g_mpuLast = total_parts;
     g_mpuUploadId = manager.upload_id;
     g_mpuKey = _object_key.c_str();
-    for(seq = 1; seq <= totalSeq ; seq ++) {
+    for(seq = 1; seq <= total_parts; seq ++) {
         memset(&partData, 0, sizeof(partData));
         partData.manager = &manager;
         partData.seq = seq;
         partData.put_object_data = data;
         //partContentLength = (data.contentLength > chunksize)?chunksize:data.contentLength;
-        partContentLength = (data.contentLength > transfer_buffer_size_for_parallel_transfer_in_megabytes*1024*1024) ?
-            transfer_buffer_size_for_parallel_transfer_in_megabytes*1024*1024 : 
-            data.contentLength;
+//        partContentLength = (data.contentLength > transfer_buffer_size_for_parallel_transfer_in_megabytes*1024*1024) ?
+//            transfer_buffer_size_for_parallel_transfer_in_megabytes*1024*1024 : 
+//            data.contentLength;
 
-        partData.put_object_data.contentLength = partContentLength;
-        //partData.put_object_data.offset = (seq-1) * chunksize;
-        partData.put_object_data.offset = (seq-1) * transfer_buffer_size_for_parallel_transfer_in_megabytes;
+
+//printf("%s:%d (%s) [thread=%d] set contentLength to %d\n", __FILE__, __LINE__, __FUNCTION__, thread_nbr, partContentLength);
+
+//        partData.put_object_data.contentLength = partContentLength;
         partData.enable_md5 = s3GetEnableMD5();
         partData.server_encrypt = s3GetServerEncrypt();
         g_mpuData[seq-1] = partData;
@@ -1090,42 +983,59 @@ printf("%s:%d (%s)\n", __FILE__, __LINE__, __FUNCTION__);
 } // end complete_multipart_upload
 
 // s3FileWrite just adds to ring buffer and starts a new reader thread if one does not exist
-void s3FileWrite(char *buffer, size_t buffer_size, off_t offset, S3BucketContext *bucket_context_ptr, int thread_number) {
+void s3FileWrite(char *buffer, size_t buffer_size, off_t offset, S3BucketContext *bucket_context_ptr, int thread_number, int thread_count, size_t file_size) {
 
 printf("%s:%d (%s) [thread=%u] [buffer_size=%zu][offset=%ld]\n", __FILE__, __LINE__, __FUNCTION__, thread_number, buffer_size, offset);
 
-    if (ring_buffer_reader_thread_map.count(thread_number) == 0) {
-        ring_buffer_instance_map[thread_number] = new irods::ring_buffer<upload_page_t>(3);
-        ring_buffer_reader_thread_map[thread_number] = new std::thread(mpuWorkerThread, bucket_context_ptr, thread_number);
+    irods::ring_buffer<upload_page_t> *ring_buffer_instance_ptr = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(ring_buffer_maps_mutex);
+        if (ring_buffer_reader_thread_map.count(thread_number) == 0) {
+            ring_buffer_instance_ptr = ring_buffer_instance_map[thread_number] = new irods::ring_buffer<upload_page_t>(3);
+            ring_buffer_reader_thread_map[thread_number] = new std::thread(mpuWorkerThread, bucket_context_ptr, thread_number, thread_count, file_size);
+        } else {
+            ring_buffer_instance_ptr = ring_buffer_instance_map[thread_number];
+        }
     }
 
     // blocks until it can write to buffer, returns immediately once written
 printf("%s:%d (%s) [thread=%u] about to write to ring_buffer\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
-    ring_buffer_instance_map[thread_number]->write({buffer, buffer_size, offset, false});
+    ring_buffer_instance_ptr->write({buffer, buffer_size, offset, false});
 printf("%s:%d (%s) [thread=%u] wrote to ring_buffer\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
 
 } // end s3FileWrite
 
 // emulates the irods behavior of taking an existing list of character buffers and sending them to the plugin
-void irods_emulator(unsigned int thread_number, std::vector<char*> *char_buffers_ptr, std::vector<size_t> *char_buffer_sizes_ptr, S3BucketContext *bucket_context_ptr, size_t file_size, size_t thread_count) {
+void irods_emulator(unsigned int thread_number, const char *filename, size_t file_size, size_t thread_count, S3BucketContext *bucket_context_ptr, size_t multipart_size) {
 
 printf("%s:%d (%s) [thread=%u] starting irods_emulator\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
 
     // thread in irods only deal with sequential bytes.  figure out what bytes this thread deals with
     size_t start = thread_number * (file_size / thread_count);
-    size_t end = (thread_number+1) * (file_size / thread_count);
-
-printf("%s:%d (%s) [thread=%u] [start=%ld][end=%ld]\n", __FILE__, __LINE__, __FUNCTION__, thread_number, start, end);
-
-    // iterate through the byte pointers and only send the ones that are in my range
-    size_t offset = 0;
-    for (unsigned int cntr = 0; cntr < char_buffers_ptr->size(); ++cntr) {
-        if (offset >= start && offset < end) {
-            s3FileWrite((*char_buffers_ptr)[cntr], (*char_buffer_sizes_ptr)[cntr], offset, bucket_context_ptr, thread_number);
-        }
-        offset += (*char_buffer_sizes_ptr)[cntr]; 
+    size_t end = 0;
+    if (thread_number == thread_count -1) {
+        end = file_size;
+    } else {
+        end = start + file_size / thread_count;
     }
+printf("%s:%d (%s) DEBUG [thread=%u] [size=%ld]\n", __FILE__, __LINE__, __FUNCTION__, thread_number, end-start);
 
+    std::ifstream ifs;
+    ifs.open(filename, std::ios::in | std::ios::binary | std::ios::ate); 
+    ifs.seekg(start, std::ios::beg);
+
+    size_t offset = start;
+    while (offset < end) {
+        size_t current_buffer_size = end - ifs.tellg() > multipart_size ? multipart_size : end - ifs.tellg();
+        char *current_buffer = new char[current_buffer_size];
+        ifs.read((char*)(current_buffer), current_buffer_size);
+printf("%s:%d (%s) [thread=%u] calling s3FileWrite(%p, %lu, %ld, ...) \n", __FILE__, __LINE__, __FUNCTION__, thread_number, current_buffer, current_buffer_size, offset);
+        s3FileWrite(current_buffer, current_buffer_size, offset, bucket_context_ptr, thread_number, thread_count, file_size);
+        offset += current_buffer_size;
+
+        // TODO copy buffer into another array and delete[] the buffer after s3FileWrite
+    }
+    ifs.close();
 
 } // end irods_emulator
 
@@ -1153,7 +1063,7 @@ int main(int argc, char **argv) {
     size_t thread_count = string_to_size_t(argv[3]);
 printf("%s:%d (%s) thread_count=%zu\n", __FILE__, __LINE__, __FUNCTION__, thread_count);*/
 
-    if (argc != 3){ 
+    if (argc != 3) { 
         std::cerr << "Usage:  multipart_upload_libs3 <file> <thread count>" << std::endl;
         return 1; 
     }
@@ -1182,21 +1092,10 @@ printf("%s:%d (%s) thread_count=%zu\n", __FILE__, __LINE__, __FUNCTION__, thread
         return 1;
     }
 
-    // read input file into buffers
-    std::vector<char*> char_buffers;
-    std::vector<size_t> char_buffer_sizes;
+    // determine file size 
     std::ifstream ifs;
     ifs.open(filename, std::ios::in | std::ios::binary | std::ios::ate); 
     file_size = ifs.tellg();
-    ifs.seekg(0, std::ios::beg);
-
-    while (ifs.tellg() < file_size) {
-        size_t current_buffer_size = file_size - ifs.tellg() > multipart_size ? multipart_size : file_size - ifs.tellg();
-        char *current_buffer = new char[current_buffer_size];
-        ifs.read((char*)(current_buffer), current_buffer_size);
-        char_buffers.push_back(current_buffer);
-        char_buffer_sizes.push_back(current_buffer_size);
-    }
     ifs.close();
 
     // this is done on file open if we are writing
@@ -1221,7 +1120,7 @@ printf("%s:%d (%s) thread_count=%zu\n", __FILE__, __LINE__, __FUNCTION__, thread
 
     upload_manager_t manager;
     S3BucketContext bucket_context;
-    irods::error ret = initialize_multipart_upload(filename, object_key, file_size, multipart_size, key_id, access_key, bucket_name, manager, bucket_context, putProps); 
+    irods::error ret = initialize_multipart_upload(filename, object_key, file_size, multipart_size, thread_count, key_id, access_key, bucket_name, manager, bucket_context, putProps); 
     if (!ret.ok()) {
         fprintf(stderr, "initialize_multipart_upload returned error\n");
         return 1;
@@ -1237,7 +1136,7 @@ printf("%s:%d (%s) thread_count=%zu\n", __FILE__, __LINE__, __FUNCTION__, thread
 
     for (unsigned int thread_number = 0; thread_number <  thread_count; ++thread_number) {
         printf("%s:%d (%s) start thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
-        writer_threads[thread_number] = std::thread(irods_emulator, thread_number, &char_buffers, &char_buffer_sizes, &bucket_context, file_size, thread_count);  // note:  move assignment
+        writer_threads[thread_number] = std::thread(irods_emulator, thread_number, filename.c_str(), file_size, thread_count, &bucket_context, multipart_size);  // note:  move assignment
     }
 
     // this is just irods waiting for s3FileWrite to finish on all writes and then deleting the threads
@@ -1252,27 +1151,36 @@ printf("%s:%d (%s) thread_count=%zu\n", __FILE__, __LINE__, __FUNCTION__, thread
     printf("%s:%d (%s) done parallel part\n", __FILE__, __LINE__, __FUNCTION__);
 
 fflush(stdout);
+
     // THIS PART IS DONE ONCE AT END (s3FileClose) 
 
     for (unsigned int thread_number = 0; thread_number <  thread_count; ++thread_number) {
 
+        irods::ring_buffer<upload_page_t> *ring_buffer_instance_ptr = nullptr; 
+        std::thread *ring_buffer_reader_thread_ptr = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(ring_buffer_maps_mutex);
+            ring_buffer_instance_ptr = ring_buffer_instance_map[thread_number]; 
+            ring_buffer_reader_thread_ptr = ring_buffer_reader_thread_map[thread_number];
+        }
+
         // write terminate message to ring_buffer
         printf("%s:%d (%s) write terminate message ring_buffer_reader thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
-        ring_buffer_instance_map[thread_number]->write({nullptr, 0, 0, true});
+        ring_buffer_instance_ptr->write({nullptr, 0, 0, true});
         printf("%s:%d (%s) done writing terminate message ring_buffer_reader thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
 
         printf("%s:%d (%s) calling join for ring_buffer_reader thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
-        ring_buffer_reader_thread_map[thread_number]->join();
+   
+        ring_buffer_reader_thread_ptr->join();
+
         printf("%s:%d (%s) joined ring_buffer_reader thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
     }
 
-    ret = complete_multipart_upload(object_key, char_buffers.size(), bucket_context, manager, putProps);
-    printf("%s:%d (%s) done complete_multipart_upload\n", __FILE__, __LINE__, __FUNCTION__);
+    //size_t part_count = (file_size + multipart_size - 1) / multipart_size;
+    size_t part_count = thread_count;
 
-    // delete allocated memory (TODO change to smart ptr or not since it is a demo)
-    for (int i = 0; i < char_buffers.size(); ++i) {
-        delete[] char_buffers[i];
-    }
+    ret = complete_multipart_upload(object_key, part_count, bucket_context, manager, putProps);
+    printf("%s:%d (%s) done complete_multipart_upload\n", __FILE__, __LINE__, __FUNCTION__);
 
     return 0;
 } // end main
