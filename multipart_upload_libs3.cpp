@@ -44,7 +44,7 @@
 #include <openssl/ssl.h>
 
 
-#include "ring_buffer.hpp"
+#include "circular_buffer.hpp"
 
 // **** just simulate irods::error ****
 
@@ -91,9 +91,9 @@ struct upload_page_t {
 std::atomic<unsigned int> current_buffer_counter;
 
 // maps the irods thread number to the reader thread and ring buffer instance
-std::mutex ring_buffer_maps_mutex;
-std::map<int, std::thread*> ring_buffer_reader_thread_map;
-std::map<int, irods::ring_buffer<upload_page_t>*> ring_buffer_instance_map; 
+std::mutex circular_buffer_maps_mutex;
+std::map<int, std::thread*> circular_buffer_reader_thread_map;
+std::map<int, irods::experimental::circular_buffer<upload_page_t>*> circular_buffer_instance_map; 
 
 const size_t S3_DEFAULT_RETRY_WAIT_SEC = 1;
 const size_t S3_DEFAULT_RETRY_COUNT = 1;
@@ -113,9 +113,9 @@ typedef struct s3Stat
 typedef struct callback_data
 {
     char *original_bytes_ptr;
-    char *bytes;               // pointer to last entry on ring_buffer
+    char *bytes;               // pointer to last entry on circular_buffer
     size_t buffer_size;
-    irods::ring_buffer<upload_page_t> *ring_buffer_instance_ptr;
+    irods::experimental::circular_buffer<upload_page_t> *circular_buffer_instance_ptr;
    
     rodsLong_t contentLength, originalContentLength;
     S3Status status;
@@ -324,14 +324,14 @@ static int putObjectDataCallback(
     void *callbackData)
 {
     // keep reading a bufferSize bytes from buffer.
-    // if buffer is empty, get another from the ring_buffer
+    // if buffer is empty, get another from the circular_buffer
     callback_data_t *data = (callback_data_t *) callbackData;
-    irods::ring_buffer<upload_page_t> *ring_buffer_instance_ptr = data->ring_buffer_instance_ptr;
+    irods::experimental::circular_buffer<upload_page_t> *circular_buffer_instance_ptr = data->circular_buffer_instance_ptr;
 
-    // if we've exhausted our current buffer, read the next buffer from the ring_buffer
+    // if we've exhausted our current buffer, read the next buffer from the circular_buffer
     if (data->buffer_size == 0) {
         upload_page_t page;
-        ring_buffer_instance_ptr->read(page);
+        circular_buffer_instance_ptr->pop_front(page);
 
         // if we get a terminate there are no more bytes to be read
         if (page.terminate_flag) {
@@ -353,7 +353,7 @@ static int putObjectDataCallback(
         length = libs3_buffer_size > data->buffer_size ? data->buffer_size : libs3_buffer_size;
 
 
-        printf("%s:%d (%s) [thread=%d] libs3_buffer_size=%d data->buffer_size=%zu length=%d\n", __FILE__, __LINE__, __FUNCTION__, thread_nbr, libs3_buffer_size, data->buffer_size, length);
+        //printf("%s:%d (%s) [thread=%d] libs3_buffer_size=%d data->buffer_size=%zu length=%d\n", __FILE__, __LINE__, __FUNCTION__, thread_nbr, libs3_buffer_size, data->buffer_size, length);
 fflush(stdout);
 
         memcpy(libs3_buffer, data->bytes, length);
@@ -599,10 +599,10 @@ static void mpuWorkerThread(void *bucketContextParam, int thread_number, int thr
 
     S3BucketContext bucketContext = *((S3BucketContext*)bucketContextParam);
 
-    irods::ring_buffer<upload_page_t> *ring_buffer_instance_ptr = nullptr;
+    irods::experimental::circular_buffer<upload_page_t> *circular_buffer_instance_ptr = nullptr;
     {
-        std::lock_guard<std::mutex> lock(ring_buffer_maps_mutex);
-        ring_buffer_instance_ptr = ring_buffer_instance_map[thread_number];
+        std::lock_guard<std::mutex> lock(circular_buffer_maps_mutex);
+        circular_buffer_instance_ptr = circular_buffer_instance_map[thread_number];
     }
 
     int seq = thread_number + 1;
@@ -611,7 +611,7 @@ static void mpuWorkerThread(void *bucketContextParam, int thread_number, int thr
 
     // read the first page
     printf("%s:%d (%s) [thread=%d] waiting to read [seq=%d]\n", __FILE__, __LINE__, __FUNCTION__, thread_number, seq);
-    ring_buffer_instance_ptr->read(page);
+    circular_buffer_instance_ptr->pop_front(page);
     printf("%s:%d (%s) [thread=%d] read page [buffer=%p][buffer_size=%zu][terminate_flag=%d][offset=%ld]\n", __FILE__, __LINE__, __FUNCTION__, thread_number, page.buffer, page.buffer_size, page.terminate_flag, page.offset_of_buffer);
 
     std::string resource_name = get_resource_name();
@@ -635,7 +635,7 @@ static void mpuWorkerThread(void *bucketContextParam, int thread_number, int thr
         partData.put_object_data.pCtx = &bucketContext;
         partData.put_object_data.original_bytes_ptr = partData.put_object_data.bytes = page.buffer;
         partData.put_object_data.buffer_size = page.buffer_size;
-        partData.put_object_data.ring_buffer_instance_ptr = ring_buffer_instance_ptr;
+        partData.put_object_data.circular_buffer_instance_ptr = circular_buffer_instance_ptr;
 
         // Each part is floor(file_size/thread_count) long.  The last thread has the extra bytes.
         if (thread_number == thread_count -1) {
@@ -943,21 +943,21 @@ void s3FileWrite(char *buffer, size_t buffer_size, off_t offset, S3BucketContext
     char *copied_buffer = new char[buffer_size];
     memcpy(copied_buffer, buffer, buffer_size);
 
-    irods::ring_buffer<upload_page_t> *ring_buffer_instance_ptr = nullptr;
+    irods::experimental::circular_buffer<upload_page_t> *circular_buffer_instance_ptr = nullptr;
     {
-        std::lock_guard<std::mutex> lock(ring_buffer_maps_mutex);
-        if (ring_buffer_reader_thread_map.count(thread_number) == 0) {
-            ring_buffer_instance_ptr = ring_buffer_instance_map[thread_number] = new irods::ring_buffer<upload_page_t>(3);
-            ring_buffer_reader_thread_map[thread_number] = new std::thread(mpuWorkerThread, bucket_context_ptr, thread_number, thread_count, file_size);
+        std::lock_guard<std::mutex> lock(circular_buffer_maps_mutex);
+        if (circular_buffer_reader_thread_map.count(thread_number) == 0) {
+            circular_buffer_instance_ptr = circular_buffer_instance_map[thread_number] = new irods::experimental::circular_buffer<upload_page_t>(3);
+            circular_buffer_reader_thread_map[thread_number] = new std::thread(mpuWorkerThread, bucket_context_ptr, thread_number, thread_count, file_size);
         } else {
-            ring_buffer_instance_ptr = ring_buffer_instance_map[thread_number];
+            circular_buffer_instance_ptr = circular_buffer_instance_map[thread_number];
         }
     }
 
     // blocks until it can write to buffer, returns immediately once written
-    printf("%s:%d (%s) [thread=%u] about to write to ring_buffer\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
-    ring_buffer_instance_ptr->write({copied_buffer, buffer_size, offset, false});
-    printf("%s:%d (%s) [thread=%u] wrote to ring_buffer\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
+    printf("%s:%d (%s) [thread=%u] about to write to circular_buffer\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
+    circular_buffer_instance_ptr->push_back({copied_buffer, buffer_size, offset, false});
+    printf("%s:%d (%s) [thread=%u] wrote to circular_buffer\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
 
 } // end s3FileWrite
 
@@ -1090,24 +1090,24 @@ int main(int argc, char **argv) {
 
     for (unsigned int thread_number = 0; thread_number <  thread_count; ++thread_number) {
 
-        irods::ring_buffer<upload_page_t> *ring_buffer_instance_ptr = nullptr; 
-        std::thread *ring_buffer_reader_thread_ptr = nullptr;
+        irods::experimental::circular_buffer<upload_page_t> *circular_buffer_instance_ptr = nullptr; 
+        std::thread *circular_buffer_reader_thread_ptr = nullptr;
         {
-            std::lock_guard<std::mutex> lock(ring_buffer_maps_mutex);
-            ring_buffer_instance_ptr = ring_buffer_instance_map[thread_number]; 
-            ring_buffer_reader_thread_ptr = ring_buffer_reader_thread_map[thread_number];
+            std::lock_guard<std::mutex> lock(circular_buffer_maps_mutex);
+            circular_buffer_instance_ptr = circular_buffer_instance_map[thread_number]; 
+            circular_buffer_reader_thread_ptr = circular_buffer_reader_thread_map[thread_number];
         }
 
-        // write terminate message to ring_buffer
-        printf("%s:%d (%s) write terminate message ring_buffer_reader thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
-        ring_buffer_instance_ptr->write({nullptr, 0, 0, true});
-        printf("%s:%d (%s) done writing terminate message ring_buffer_reader thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
+        // write terminate message to circular_buffer
+        printf("%s:%d (%s) write terminate message circular_buffer_reader thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
+        circular_buffer_instance_ptr->push_back({nullptr, 0, 0, true});
+        printf("%s:%d (%s) done writing terminate message circular_buffer_reader thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
 
-        printf("%s:%d (%s) calling join for ring_buffer_reader thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
+        printf("%s:%d (%s) calling join for circular_buffer_reader thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
    
-        ring_buffer_reader_thread_ptr->join();
+        circular_buffer_reader_thread_ptr->join();
 
-        printf("%s:%d (%s) joined ring_buffer_reader thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
+        printf("%s:%d (%s) joined circular_buffer_reader thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
     }
 
     size_t part_count = thread_count;
