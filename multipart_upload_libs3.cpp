@@ -34,6 +34,7 @@
 #include <sys/file.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <string.h>
 
 // other includes
 #include <string.h>
@@ -42,6 +43,7 @@
 #include <libxml/tree.h>
 #include <libs3.h>
 #include <openssl/ssl.h>
+#include <jansson.h>
 
 
 #include "circular_buffer.hpp"
@@ -80,6 +82,8 @@ typedef __int64_t rodsLong_t;
 
 // ************************************
 
+bool debug_flag = false;
+
 // individual request
 struct upload_page_t {
    char *buffer;
@@ -91,7 +95,6 @@ struct upload_page_t {
 std::atomic<unsigned int> current_buffer_counter;
 
 // maps the irods thread number to the reader thread and ring buffer instance
-std::mutex circular_buffer_maps_mutex;
 std::map<int, std::thread*> circular_buffer_reader_thread_map;
 std::map<int, irods::experimental::circular_buffer<upload_page_t>*> circular_buffer_instance_map; 
 
@@ -211,7 +214,8 @@ static char *s3CalcMD5( int fd, off_t start, off_t length, const std::string& re
 
     buff = (char *)malloc( 1024*1024 ); // 1MB chunk reads
     if ( buff == NULL ) {
-        printf( "[resource_name=%s] Out of memory in S3 MD5 calculation, MD5 checksum will NOT be used for upload.\n", resource_name.c_str() );
+        printf( "[resource_name=%s] Out of memory in S3 MD5 calculation, MD5 "
+                "checksum will NOT be used for upload.\n", resource_name.c_str() );
         return NULL;
     }
 
@@ -219,7 +223,8 @@ static char *s3CalcMD5( int fd, off_t start, off_t length, const std::string& re
     for ( read=0; (read + 1024*1024) < length; read += 1024*1024 ) {
         long ret = pread( fd, buff, 1024*1024, start );
         if ( ret != 1024*1024 ) {
-            printf( "[resource_name=%s] Error during MD5 pread of file, checksum will NOT be used for upload.\n", resource_name.c_str() );
+            printf( "[resource_name=%s] Error during MD5 pread of file, checksum will NOT be used for upload.\n", 
+                    resource_name.c_str() );
             free( buff );
             return NULL;
         }
@@ -229,7 +234,8 @@ static char *s3CalcMD5( int fd, off_t start, off_t length, const std::string& re
     // Partial read for the last bit
     long ret = pread( fd, buff, length-read, start );
     if ( ret != length-read ) {
-        printf( "[resource_name=%s] Error during MD5 pread of file, checksum will NOT be used for upload.\n", resource_name.c_str() );
+        printf( "[resource_name=%s] Error during MD5 pread of file, checksum will NOT be used for upload.\n", 
+                resource_name.c_str() );
         free( buff );
         return NULL;
     }
@@ -244,21 +250,24 @@ static char *s3CalcMD5( int fd, off_t start, off_t length, const std::string& re
     b64 = BIO_new(BIO_f_base64());
     bmem = BIO_new(BIO_s_mem());
     if ( (b64 == NULL) || (bmem == NULL) ) {
-        printf( "[resource_name=%s] Error during Base64 allocation, checksum will NOT be used for upload.\n", resource_name.c_str() );
+        printf( "[resource_name=%s] Error during Base64 allocation, checksum will NOT be used for upload.\n", 
+                resource_name.c_str() );
         return NULL;
     }
 
     b64 = BIO_push(b64, bmem);
     BIO_write(b64, md5_bin, MD5_DIGEST_LENGTH);
     if (BIO_flush(b64) != 1) {
-        printf( "[resource_name=%s] Error during Base64 computation, checksum will NOT be used for upload.\n", resource_name.c_str() );
+        printf( "[resource_name=%s] Error during Base64 computation, checksum will NOT be used for upload.\n", 
+                resource_name.c_str() );
         return NULL;
     }
     BIO_get_mem_ptr(b64, &bptr);
 
     char *md5_b64 = (char*)malloc( bptr->length );
     if ( md5_b64 == NULL ) {
-        printf( "[resource_name=%s] Error during MD5 allocation, checksum will NOT be used for upload.\n", resource_name.c_str() );
+        printf( "[resource_name=%s] Error during MD5 allocation, checksum will NOT be used for upload.\n", 
+                resource_name.c_str() );
         return NULL;
     }
     memcpy( md5_b64, bptr->data, bptr->length-1 );
@@ -282,19 +291,22 @@ static void StoreAndLogStatus (
         printf( "  S3Status: [%s] - %d\n", S3_get_status_name( status ), (int) status );
         printf( "    S3Host: %s\n", pCtx->hostName );
     }
-    if (status != S3StatusOK && function )
-        printf( "  Function: %s\n", function );
-    if (error && error->message)
-        printf( "  Message: %s\n", error->message);
-    if (error && error->resource)
-        printf( "  Resource: %s\n", error->resource);
-    if (error && error->furtherDetails)
-        printf( "  Further Details: %s\n", error->furtherDetails);
-    if (error && error->extraDetailsCount) {
-        printf( "%s", "  Extra Details:\n");
 
-        for (i = 0; i < error->extraDetailsCount; i++) {
-            printf( "    %s: %s\n", error->extraDetails[i].name, error->extraDetails[i].value);
+    if (debug_flag) {
+        if (status != S3StatusOK && function )
+            printf( "  Function: %s\n", function );
+        if (error && error->message)
+            printf( "  Message: %s\n", error->message);
+        if (error && error->resource)
+            printf( "  Resource: %s\n", error->resource);
+        if (error && error->furtherDetails)
+            printf( "  Further Details: %s\n", error->furtherDetails);
+        if (error && error->extraDetailsCount) {
+            printf( "%s", "  Extra Details:\n");
+
+            for (i = 0; i < error->extraDetailsCount; i++) {
+                printf( "    %s: %s\n", error->extraDetails[i].name, error->extraDetails[i].value);
+            }
         }
     }
 }  // end StoreAndLogStatus
@@ -326,38 +338,30 @@ static int putObjectDataCallback(
     // keep reading a bufferSize bytes from buffer.
     // if buffer is empty, get another from the circular_buffer
     callback_data_t *data = (callback_data_t *) callbackData;
-    irods::experimental::circular_buffer<upload_page_t> *circular_buffer_instance_ptr = data->circular_buffer_instance_ptr;
+    irods::experimental::circular_buffer<upload_page_t> *circular_buffer_instance_ptr = 
+        data->circular_buffer_instance_ptr;
 
     // if we've exhausted our current buffer, read the next buffer from the circular_buffer
-    if (data->buffer_size == 0) {
+    while (0 == data->buffer_size) {
         upload_page_t page;
         circular_buffer_instance_ptr->pop_front(page);
 
+        delete[] data->original_bytes_ptr;
+
         // if we get a terminate there are no more bytes to be read
         if (page.terminate_flag) {
-            delete[] data->original_bytes_ptr;
             return 0;
         }
-        delete[] data->original_bytes_ptr;
         data->original_bytes_ptr = data->bytes = page.buffer;
         data->buffer_size = page.buffer_size;
     }
 
-    int length = 0;
+    // bufferSize is the size of *buffer provided by libs3
+    // data->buffer_size is the size of data->bytes we set up
 
-    if (0 < data->buffer_size) {
+    auto length = libs3_buffer_size > data->buffer_size ? data->buffer_size : libs3_buffer_size;
+    memcpy(libs3_buffer, data->bytes, length);
 
-        // bufferSize is the size of *buffer provided by libs3
-        // data->buffer_size is the size of data->bytes we set up
-
-        length = libs3_buffer_size > data->buffer_size ? data->buffer_size : libs3_buffer_size;
-
-
-        //printf("%s:%d (%s) [thread=%d] libs3_buffer_size=%d data->buffer_size=%zu length=%d\n", __FILE__, __LINE__, __FUNCTION__, thread_nbr, libs3_buffer_size, data->buffer_size, length);
-fflush(stdout);
-
-        memcpy(libs3_buffer, data->bytes, length);
-    }
     data->buffer_size -= length;
     data->bytes += length;
 
@@ -371,9 +375,9 @@ S3SignatureVersion s3GetSignatureVersion ()
     return S3SignatureV2; // default
 } // end s3GetSignatureVersion
 
+std::string global_hostname = "";
 std::string s3GetHostname() {
-    return "s3.amazonaws.com";
-    //return "127.0.0.1:9000";
+    return global_hostname;
 } // end s3GetHostname
 
 S3Protocol s3GetProto()
@@ -411,17 +415,19 @@ static const char *g_mpuKey = NULL;
 static irods::error g_mpuResult;  // Last thread error written wins, mutex protected
 
 void print_g_mpuData(int part_cnt) {
-    for (int i = 0; i < part_cnt; ++i) {
-       printf("------ g_mpuData ------\n");
-       printf("g_mpuData[%d].seq: %d\n", i, g_mpuData[i].seq);
-       printf("g_mpuData[%d].mode: %d\n", i, g_mpuData[i].mode);
-       printf("g_mpuData[%d].enable_md5: %d\n", i, g_mpuData[i].enable_md5);
-       printf("g_mpuData[%d].server_encrypt: %d\n", i, g_mpuData[i].server_encrypt);
-       if (g_mpuData[i].manager) {
-           printf("g_mpuData[%d].manager->offset: %ld\n", i, g_mpuData[i].manager->offset);
-           printf("m_gmpuData[%d].anager->remaining: %ld\n", i, g_mpuData[i].manager->remaining);
-       }
-   }
+    if (debug_flag) {
+        for (int i = 0; i < part_cnt; ++i) {
+            printf("------ g_mpuData ------\n");
+            printf("g_mpuData[%d].seq: %d\n", i, g_mpuData[i].seq);
+            printf("g_mpuData[%d].mode: %d\n", i, g_mpuData[i].mode);
+            printf("g_mpuData[%d].enable_md5: %d\n", i, g_mpuData[i].enable_md5);
+            printf("g_mpuData[%d].server_encrypt: %d\n", i, g_mpuData[i].server_encrypt);
+            if (g_mpuData[i].manager) {
+                printf("g_mpuData[%d].manager->offset: %ld\n", i, g_mpuData[i].manager->offset);
+                printf("m_gmpuData[%d].anager->remaining: %ld\n", i, g_mpuData[i].manager->remaining);
+            }
+        }
+    }
 } // end print_g_mpuData
 
     int seq;                       /* Sequence number, i.e. which part */
@@ -474,7 +480,8 @@ static int mpuPartPutDataCB (
     char *buffer,
     void *callbackData)
 {
-    return putObjectDataCallback( bufferSize, buffer, &((multipart_data_t*)callbackData)->put_object_data );
+    return putObjectDataCallback( bufferSize, buffer, 
+                                  &((multipart_data_t*)callbackData)->put_object_data );
 } // end mpuPartPutDataCB
 
 static S3Status mpuPartRespPropCB (
@@ -574,15 +581,19 @@ static void mpuCancel( S3BucketContext *bucketContext, const char *key, const ch
 
     std::string resource_name = get_resource_name();
 
-    msg << "[resource_name=" << resource_name << "] " << "Cancelling multipart upload: key=\"" << key << "\", upload_id=\"" << upload_id << "\"";
-    printf( "%s\n", msg.str().c_str() );
+    if (debug_flag) {
+        msg << "[resource_name=" << resource_name << "] " << "Cancelling multipart upload: key=\"" 
+            << key << "\", upload_id=\"" << upload_id << "\"";
+        printf( "%s\n", msg.str().c_str() );
+    }
     g_mpuCancelRespCompCB_status = S3StatusOK;
     g_mpuCancelRespCompCB_pCtx = bucketContext;
     S3_abort_multipart_upload(bucketContext, key, upload_id, &abortHandler);
     status = g_mpuCancelRespCompCB_status;
     if (status != S3StatusOK) {
         msg.str( std::string() ); // Clear
-        msg << "[resource_name=" << resource_name << "] " << __FUNCTION__ << " - Error cancelling the multipart upload of S3 object: \"" << key << "\"";
+        msg << "[resource_name=" << resource_name << "] " << __FUNCTION__ 
+            << " - Error cancelling the multipart upload of S3 object: \"" << key << "\"";
         if (status >= 0) {
             msg << " - \"" << S3_get_status_name(status) << "\"";
         }
@@ -600,19 +611,21 @@ static void mpuWorkerThread(void *bucketContextParam, int thread_number, int thr
     S3BucketContext bucketContext = *((S3BucketContext*)bucketContextParam);
 
     irods::experimental::circular_buffer<upload_page_t> *circular_buffer_instance_ptr = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(circular_buffer_maps_mutex);
-        circular_buffer_instance_ptr = circular_buffer_instance_map[thread_number];
-    }
+    circular_buffer_instance_ptr = circular_buffer_instance_map[thread_number];
 
     int seq = thread_number + 1;
 
     upload_page_t page;
 
     // read the first page
-    printf("%s:%d (%s) [thread=%d] waiting to read [seq=%d]\n", __FILE__, __LINE__, __FUNCTION__, thread_number, seq);
+    if (debug_flag) {
+        printf("%s:%d (%s) [thread=%d] waiting to read [seq=%d]\n", __FILE__, __LINE__, __FUNCTION__, thread_number, seq);
+    }
     circular_buffer_instance_ptr->pop_front(page);
-    printf("%s:%d (%s) [thread=%d] read page [buffer=%p][buffer_size=%zu][terminate_flag=%d][offset=%ld]\n", __FILE__, __LINE__, __FUNCTION__, thread_number, page.buffer, page.buffer_size, page.terminate_flag, page.offset_of_buffer);
+    if (debug_flag) {
+        printf("%s:%d (%s) [thread=%d] read page [buffer=%p][buffer_size=%zu][terminate_flag=%d][offset=%ld]\n", 
+                __FILE__, __LINE__, __FUNCTION__, thread_number, page.buffer, page.buffer_size, page.terminate_flag, page.offset_of_buffer);
+    }
 
     std::string resource_name = get_resource_name();
 
@@ -644,11 +657,13 @@ static void mpuWorkerThread(void *bucketContextParam, int thread_number, int thr
             partData.put_object_data.contentLength = file_size / thread_count;
         }
 
-        msg.str( std::string() ); // Clear
-        msg << "Multipart:  Start part " << (int)seq << ", key \"" << g_mpuKey << "\", uploadid \"" << g_mpuUploadId << 
-            ", len " << (int)partData.put_object_data.contentLength;
-        printf( "%s:%d (%s) [thread=%u] %s\n", __FILE__, __LINE__, __FUNCTION__, thread_number, msg.str().c_str() );
-        msg.str( std::string() ); // Clear
+        if (debug_flag) {
+            msg.str( std::string() ); // Clear
+            msg << "Multipart:  Start part " << (int)seq << ", key \"" << g_mpuKey << "\", uploadid \"" << g_mpuUploadId << 
+                ", len " << (int)partData.put_object_data.contentLength;
+            printf( "%s:%d (%s) [thread=%u] %s\n", __FILE__, __LINE__, __FUNCTION__, thread_number, msg.str().c_str() );
+            msg.str( std::string() ); // Clear
+        }
 
         S3PutProperties *putProps = NULL;
         putProps = (S3PutProperties*)calloc( sizeof(S3PutProperties), 1 );
@@ -662,9 +677,15 @@ static void mpuWorkerThread(void *bucketContextParam, int thread_number, int thr
         std::string hostname = s3GetHostname();
         bucketContext.hostName = hostname.c_str(); 
 
-        printf("%s:%d (%s) [thread=%d] S3_upload_part (ctx, key, props, handler, %d, uploadId, %ld, 0, partData)\n", __FILE__, __LINE__, __FUNCTION__, thread_number, seq, partData.put_object_data.contentLength);
-        S3_upload_part(&bucketContext, g_mpuKey, putProps, &putObjectHandler, seq, g_mpuUploadId, partData.put_object_data.contentLength, 0, &partData);
-        printf("%s:%d (%s) [thread=%d] S3_upload_part returned\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
+        if (debug_flag) {
+            printf("%s:%d (%s) [thread=%d] S3_upload_part (ctx, key, props, handler, %d, uploadId, %ld, 0, partData)\n", 
+                    __FILE__, __LINE__, __FUNCTION__, thread_number, seq, partData.put_object_data.contentLength);
+        }
+        S3_upload_part(&bucketContext, g_mpuKey, putProps, &putObjectHandler, seq, g_mpuUploadId, 
+                partData.put_object_data.contentLength, 0, &partData);
+        if (debug_flag) {
+            printf("%s:%d (%s) [thread=%d] S3_upload_part returned\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
+        }
 
 
         unsigned long long usEnd = usNow();
@@ -674,13 +695,16 @@ static void mpuWorkerThread(void *bucketContextParam, int thread_number, int thr
             if (putProps->md5) free( (char*)putProps->md5 );
             free( putProps );
         }
-        msg << "Multipart:  -- END -- BW=" << bw << " MB/s";
-        printf( "%s:%d (%s) [thread=%u] %s\n", __FILE__, __LINE__, __FUNCTION__, thread_number, msg.str().c_str() );
+        if (debug_flag) {
+            msg << "Multipart:  -- END -- BW=" << bw << " MB/s";
+            printf( "%s:%d (%s) [thread=%u] %s\n", __FILE__, __LINE__, __FUNCTION__, thread_number, msg.str().c_str() );
+        }
         if (partData.status != S3StatusOK) s3_sleep( retry_wait, 0 );
     } while ((partData.status != S3StatusOK) && S3_status_is_retryable(partData.status) && (++retry_cnt < retry_count_limit));
     if (partData.status != S3StatusOK) {
         msg.str( std::string() ); // Clear
-        msg << "[resource_name=" << resource_name << "] " << __FUNCTION__ << " - Error putting the S3 object: \"" << g_mpuKey << "\"" << " part " << seq;
+        msg << "[resource_name=" << resource_name << "] " << __FUNCTION__ << " - Error putting the S3 object: \"" 
+            << g_mpuKey << "\"" << " part " << seq;
         if(partData.status >= 0) {
             msg << " - \"" << S3_get_status_name(partData.status) << "\"";
         }
@@ -769,7 +793,8 @@ irods::error initialize_multipart_upload(
             if (putProps->md5) free( (char*)putProps->md5 );
             free( putProps );
         }
-        std::string msg =  boost::str(boost::format("[resource_name=%s] Out of memory error in S3 multipart ETags allocation.") % resource_name.c_str());
+        std::string msg =  boost::str(boost::format("[resource_name=%s] Out of memory error in "
+                                                    "S3 multipart ETags allocation.") % resource_name.c_str());
         printf( "%s\n", msg.c_str() );
         result = ERROR( SYS_MALLOC_ERR, msg.c_str() );
         return result;
@@ -782,7 +807,8 @@ irods::error initialize_multipart_upload(
             free( putProps );
         }
         free(manager.etags);
-        std::string msg =  boost::str(boost::format("[resource_name=%s] Out of memory error in S3 multipart g_mupData allocation.") % resource_name.c_str());
+        std::string msg =  boost::str(boost::format("[resource_name=%s] Out of memory error in "
+                                                   "S3 multipart g_mupData allocation.") % resource_name.c_str());
         printf( "%s\n", msg.c_str() );
         result = ERROR( SYS_MALLOC_ERR, msg.c_str() );
         return result;
@@ -797,7 +823,8 @@ irods::error initialize_multipart_upload(
         }
         free(g_mpuData);
         free(manager.etags);
-        std::string msg =  boost::str(boost::format("[resource_name=%s] Out of memory error in S3 multiparts XML allocation.") % resource_name.c_str());
+        std::string msg =  boost::str(boost::format("[resource_name=%s] Out of memory error in "
+                                                    "S3 multiparts XML allocation.") % resource_name.c_str());
         printf( "%s\n", msg.c_str() );
         result = ERROR( SYS_MALLOC_ERR, msg.c_str() );
         return result;
@@ -820,7 +847,8 @@ irods::error initialize_multipart_upload(
             free( putProps );
         }
         msg.str( std::string() ); // Clear
-        msg << "[resource_name=" << resource_name << "] " << __FUNCTION__ << " - Error initiating multipart upload of the S3 object: \"" << _object_key << "\"";
+        msg << "[resource_name=" << resource_name << "] " << __FUNCTION__ 
+            << " - Error initiating multipart upload of the S3 object: \"" << _object_key << "\"";
         if(manager.status >= 0) {
             msg << " - \"" << S3_get_status_name(manager.status) << "\"";
         }
@@ -867,9 +895,11 @@ irods::error complete_multipart_upload(
     size_t retry_count_limit = S3_DEFAULT_RETRY_COUNT;
 
     if (g_mpuResult.ok()) { // If someone aborted, don't complete...
-        msg.str( std::string() ); // Clear
-        msg << "Multipart:  Completing key \"" << _object_key.c_str() << "\"";
-        printf( "%s\n", msg.str().c_str() );
+        if (debug_flag) {
+            msg.str( std::string() ); // Clear
+            msg << "Multipart:  Completing key \"" << _object_key.c_str() << "\"";
+            printf( "%s\n", msg.str().c_str() );
+        }
 
         int i;
         strcpy(manager.xml, "<CompleteMultipartUpload>\n");
@@ -894,8 +924,11 @@ irods::error complete_multipart_upload(
             std::string hostname = s3GetHostname();
             bucketContext.hostName = hostname.c_str(); 
             manager.pCtx = &bucketContext;
-            S3_complete_multipart_upload(&bucketContext, _object_key.c_str(), &commit_handler, manager.upload_id, manager.remaining, NULL, &manager);
-            printf("%s:%d (%s) [manager.status=%s]\n", __FILE__, __LINE__, __FUNCTION__, S3_get_status_name(manager.status));
+            S3_complete_multipart_upload(&bucketContext, _object_key.c_str(), &commit_handler, manager.upload_id, 
+                    manager.remaining, NULL, &manager);
+            if (debug_flag) {
+                printf("%s:%d (%s) [manager.status=%s]\n", __FILE__, __LINE__, __FUNCTION__, S3_get_status_name(manager.status));
+            }
             if (manager.status != S3StatusOK) s3_sleep( retry_wait, 0 );
         } while ((manager.status != S3StatusOK) && S3_status_is_retryable(manager.status) && ( ++retry_cnt < retry_count_limit));
         if (manager.status != S3StatusOK) {
@@ -934,37 +967,43 @@ irods::error complete_multipart_upload(
 } // end complete_multipart_upload
 
 // s3FileWrite just adds to ring buffer and starts a new reader thread if one does not exist
-void s3FileWrite(char *buffer, size_t buffer_size, off_t offset, S3BucketContext *bucket_context_ptr, int thread_number, int thread_count, size_t file_size) {
+void s3FileWrite(char *buffer, size_t buffer_size, off_t offset, S3BucketContext *bucket_context_ptr, 
+                 int thread_number, int thread_count, size_t file_size) {
 
-    printf("%s:%d (%s) [thread=%u] [buffer_size=%zu][offset=%ld]\n", __FILE__, __LINE__, __FUNCTION__, thread_number, buffer_size, offset);
+    if (debug_flag) {
+        printf("%s:%d (%s) [thread=%u] [buffer_size=%zu][offset=%ld]\n", 
+                __FILE__, __LINE__, __FUNCTION__, thread_number, buffer_size, offset);
+    }
 
     // We must copy the buffer because it will persist after s3FileWrite returns.
     // Not sure when iRODS would delete it.
     char *copied_buffer = new char[buffer_size];
     memcpy(copied_buffer, buffer, buffer_size);
 
-    irods::experimental::circular_buffer<upload_page_t> *circular_buffer_instance_ptr = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(circular_buffer_maps_mutex);
-        if (circular_buffer_reader_thread_map.count(thread_number) == 0) {
-            circular_buffer_instance_ptr = circular_buffer_instance_map[thread_number] = new irods::experimental::circular_buffer<upload_page_t>(3);
-            circular_buffer_reader_thread_map[thread_number] = new std::thread(mpuWorkerThread, bucket_context_ptr, thread_number, thread_count, file_size);
-        } else {
-            circular_buffer_instance_ptr = circular_buffer_instance_map[thread_number];
-        }
-    }
+    // TODO move this to start 
+    irods::experimental::circular_buffer<upload_page_t> *circular_buffer_instance_ptr = 
+        circular_buffer_instance_ptr = circular_buffer_instance_map[thread_number];
 
     // blocks until it can write to buffer, returns immediately once written
-    printf("%s:%d (%s) [thread=%u] about to write to circular_buffer\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
+    if (debug_flag) {
+        printf("%s:%d (%s) [thread=%u] about to write to circular_buffer\n", 
+                __FILE__, __LINE__, __FUNCTION__, thread_number);
+    }
     circular_buffer_instance_ptr->push_back({copied_buffer, buffer_size, offset, false});
-    printf("%s:%d (%s) [thread=%u] wrote to circular_buffer\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
+    if (debug_flag) {
+        printf("%s:%d (%s) [thread=%u] wrote to circular_buffer\n", 
+                __FILE__, __LINE__, __FUNCTION__, thread_number);
+    }
 
 } // end s3FileWrite
 
 // emulates the irods behavior of taking an existing list of character buffers and sending them to the plugin
-void irods_emulator(unsigned int thread_number, const char *filename, size_t file_size, size_t thread_count, S3BucketContext *bucket_context_ptr, size_t multipart_size) {
+void irods_emulator(unsigned int thread_number, const char *filename, size_t file_size, 
+        size_t thread_count, S3BucketContext *bucket_context_ptr, size_t multipart_size) {
 
-    printf("%s:%d (%s) [thread=%u] starting irods_emulator\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
+    if (debug_flag) {
+        printf("%s:%d (%s) [thread=%u] starting irods_emulator\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
+    }
 
     // TODO We are setting the thread count here
     // thread in irods only deal with sequential bytes.  figure out what bytes this thread deals with
@@ -999,17 +1038,77 @@ void irods_emulator(unsigned int thread_number, const char *filename, size_t fil
 
 int main(int argc, char **argv) { 
 
-    if (argc != 3) { 
-        std::cerr << "Usage:  multipart_upload_libs3 <file> <thread count>" << std::endl;
+    if (3 != argc) { 
+        std::cerr << "Usage:  multipart_upload_libs3 <config_file> <upload_file>" << std::endl;
         return 1; 
     }
 
-    std::string filename = argv[1];
+    std::string config_file = argv[1];
+    std::string filename = argv[2];
     size_t multipart_size = transfer_buffer_size_for_parallel_transfer_in_megabytes*1024*1024;
 
-    size_t thread_count = string_to_size_t(argv[2]);
+    // read configuration file
+    std::ifstream t(config_file);
+    std::string config_str((std::istreambuf_iterator<char>(t)),
+                             std::istreambuf_iterator<char>());
+    json_t *root;
+    json_error_t error;
+    root = json_loads(config_str.c_str(), 0, &error);
 
-    std::string hostname = s3GetHostname();
+    if(!root)
+    {
+        fprintf(stderr, "error: on line %d in %s: %s\n", error.line, config_file.c_str(), error.text);
+        return 1;
+    }
+
+    json_t *keyfile_json_object = json_object_get(root, "keyfile");
+    if(!json_is_string(keyfile_json_object))
+    {
+        fprintf(stderr, "error: keyfile missing or is not a string in %s\n", config_file.c_str());
+        json_decref(root);
+        return 1;
+    }
+    std::string keyfile = json_string_value(keyfile_json_object);
+
+    json_t *hostname_json_object = json_object_get(root, "hostname");
+    if(!json_is_string(hostname_json_object))
+    {
+        fprintf(stderr, "error: (%s): hostname missing or is not a string\n", config_file.c_str());
+        json_decref(root);
+        return 1;
+    }
+    std::string hostname = json_string_value(hostname_json_object);
+    global_hostname = hostname;  // just for now use global 
+
+    json_t *bucket_name_json_object = json_object_get(root, "bucket_name");
+    if(!json_is_string(bucket_name_json_object))
+    {
+        fprintf(stderr, "error: (%s) bucket_name missing or is not a string\n", config_file.c_str());
+        json_decref(root);
+        return 1;
+    }
+    std::string bucket_name = json_string_value(bucket_name_json_object);
+
+    json_t *thread_count_json_object = json_object_get(root, "thread_count");
+    if(!json_is_integer(thread_count_json_object))
+    {
+        fprintf(stderr, "error: (%s) thread_count missing or is not an integer\n", config_file.c_str());
+        json_decref(root);
+        return 1;
+    }
+    size_t thread_count = json_integer_value(thread_count_json_object);
+
+    json_t *circular_buffer_capacity_json_object = json_object_get(root, "circular_buffer_capacity");
+    if(!json_is_integer(circular_buffer_capacity_json_object))
+    {
+        fprintf(stderr, "error: (%s) circular_buffer_capacity missing or is not an integer\n", config_file.c_str());
+        json_decref(root);
+        return 1;
+    }
+    size_t circular_buffer_capacity = json_integer_value(circular_buffer_capacity_json_object);
+
+    json_t *debug_flag_json_object = json_object_get(root, "debug_flag");
+    bool debug_flag = json_is_true(debug_flag_json_object) ? true : false;
 
     // AWS
     std::string key_id;
@@ -1018,7 +1117,7 @@ int main(int argc, char **argv) {
     // open and read keyfile
     std::ifstream key_ifs;
     //key_ifs.open("/projects/irods/vsphere-testing/externals/amazon_web_services-CI.keypair");
-    key_ifs.open("minio.keypair");
+    key_ifs.open(keyfile.c_str());
     if (!std::getline(key_ifs, key_id)) {
         std::cerr << "Key file does not have a key_id." << std::endl;
         return 1;
@@ -1036,7 +1135,6 @@ int main(int argc, char **argv) {
     ifs.close();
 
     // this is done on file open if we are writing
-    std::string bucket_name = "justinkylejames1";
     std::string object_key = filename;
 
     std::atomic_init(&current_buffer_counter, static_cast<unsigned int>(0));
@@ -1057,10 +1155,18 @@ int main(int argc, char **argv) {
 
     upload_manager_t manager;
     S3BucketContext bucket_context;
-    irods::error ret = initialize_multipart_upload(filename, object_key, file_size, thread_count, key_id, access_key, bucket_name, manager, bucket_context, putProps); 
+    irods::error ret = initialize_multipart_upload(filename, object_key, file_size, thread_count, 
+            key_id, access_key, bucket_name, manager, bucket_context, putProps); 
     if (!ret.ok()) {
         fprintf(stderr, "initialize_multipart_upload returned error\n");
         return 1;
+    }
+    
+    // create circular buffers and thread instances
+    for (unsigned int thread_number = 0; thread_number <  thread_count; ++thread_number) {
+       circular_buffer_instance_map[thread_number] = new irods::experimental::circular_buffer<upload_page_t>(circular_buffer_capacity);
+       circular_buffer_reader_thread_map[thread_number] = 
+           new std::thread(mpuWorkerThread, &bucket_context, thread_number, thread_count, file_size);
     }
 
 
@@ -1070,50 +1176,67 @@ int main(int argc, char **argv) {
     std::thread *writer_threads = new std::thread[thread_count];
 
     for (unsigned int thread_number = 0; thread_number <  thread_count; ++thread_number) {
-        printf("%s:%d (%s) start thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
-        writer_threads[thread_number] = std::move(std::thread(irods_emulator, thread_number, filename.c_str(), file_size, thread_count, &bucket_context, multipart_size));  
+        if (debug_flag) {
+            printf("%s:%d (%s) start thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
+        }
+        writer_threads[thread_number] = std::move(std::thread(irods_emulator, thread_number, 
+                                                              filename.c_str(), file_size, thread_count, 
+                                                              &bucket_context, multipart_size));  
     }
 
     // this is just irods waiting for s3FileWrite to finish on all writes and then deleting the threads
     for (unsigned int thread_number = 0; thread_number <  thread_count; ++thread_number) {
-        printf("%s:%d (%s) calling join for thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
+        if (debug_flag) {
+            printf("%s:%d (%s) calling join for thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
+        }
         writer_threads[thread_number].join();
-        printf("%s:%d (%s) joined thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
+        if (debug_flag) {
+            printf("%s:%d (%s) joined thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
+        }
     }
 
     delete[] writer_threads;
 
-    printf("%s:%d (%s) done parallel part\n", __FILE__, __LINE__, __FUNCTION__);
+    if (debug_flag) {
+        printf("%s:%d (%s) done parallel part\n", __FILE__, __LINE__, __FUNCTION__);
+    }
 
 
     // THIS PART IS DONE ONCE AT END (s3FileClose) 
 
     for (unsigned int thread_number = 0; thread_number <  thread_count; ++thread_number) {
 
-        irods::experimental::circular_buffer<upload_page_t> *circular_buffer_instance_ptr = nullptr; 
-        std::thread *circular_buffer_reader_thread_ptr = nullptr;
-        {
-            std::lock_guard<std::mutex> lock(circular_buffer_maps_mutex);
-            circular_buffer_instance_ptr = circular_buffer_instance_map[thread_number]; 
-            circular_buffer_reader_thread_ptr = circular_buffer_reader_thread_map[thread_number];
-        }
+        irods::experimental::circular_buffer<upload_page_t> *circular_buffer_instance_ptr = 
+            circular_buffer_instance_map[thread_number]; 
+        std::thread *circular_buffer_reader_thread_ptr = circular_buffer_reader_thread_map[thread_number];
 
         // write terminate message to circular_buffer
-        printf("%s:%d (%s) write terminate message circular_buffer_reader thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
+        if (debug_flag) {
+            printf("%s:%d (%s) write terminate message circular_buffer_reader thread %d\n", 
+                    __FILE__, __LINE__, __FUNCTION__, thread_number);
+        }
         circular_buffer_instance_ptr->push_back({nullptr, 0, 0, true});
-        printf("%s:%d (%s) done writing terminate message circular_buffer_reader thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
-
-        printf("%s:%d (%s) calling join for circular_buffer_reader thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
+        if (debug_flag) {
+            printf("%s:%d (%s) done writing terminate message circular_buffer_reader thread %d\n", 
+                    __FILE__, __LINE__, __FUNCTION__, thread_number);
+            printf("%s:%d (%s) calling join for circular_buffer_reader thread %d\n", 
+                    __FILE__, __LINE__, __FUNCTION__, thread_number);
+        }
    
         circular_buffer_reader_thread_ptr->join();
 
-        printf("%s:%d (%s) joined circular_buffer_reader thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
+        if (debug_flag) {
+            printf("%s:%d (%s) joined circular_buffer_reader thread %d\n", 
+                    __FILE__, __LINE__, __FUNCTION__, thread_number);
+        }
     }
 
     size_t part_count = thread_count;
 
     ret = complete_multipart_upload(object_key, part_count, bucket_context, manager, putProps);
-    printf("%s:%d (%s) done complete_multipart_upload\n", __FILE__, __LINE__, __FUNCTION__);
+    if (debug_flag) {
+        printf("%s:%d (%s) done complete_multipart_upload\n", __FILE__, __LINE__, __FUNCTION__);
+    }
 
     return 0;
 } // end main

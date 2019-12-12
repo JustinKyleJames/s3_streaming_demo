@@ -1,0 +1,8 @@
+{
+    "keyfile" : "minio.keypair",
+    "hostname" : "s3.amazonaws.com",
+    "bucket_name": "justinkylejames1",
+    "thread_count": 4,
+    "debug_flag": false,
+    "circular_buffer_capacity": 10
+}
