@@ -1,8 +1,8 @@
 {
-    "keyfile" : "minio.keypair",
+    "keyfile" : "/projects/irods/vsphere-testing/externals/amazon_web_services-CI.keypair",
     "hostname" : "s3.amazonaws.com",
     "bucket_name": "justinkylejames1",
     "thread_count": 4,
-    "debug_flag": false,
+    "debug_flag": true,
     "circular_buffer_capacity": 10
 }

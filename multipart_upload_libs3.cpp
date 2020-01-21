@@ -409,7 +409,7 @@ S3STSDate s3GetSTSDate()
     return S3STSAmzOnly;
 } // end s3GetSTSDate
 
-static multipart_data_t *g_mpuData = NULL;
+//static multipart_data_t *g_mpuData = NULL;
 static char *g_mpuUploadId = NULL;
 static const char *g_mpuKey = NULL;
 static irods::error g_mpuResult;  // Last thread error written wins, mutex protected

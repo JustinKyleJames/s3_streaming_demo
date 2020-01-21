@@ -8,7 +8,6 @@ namespace irods {
 namespace experimental {
 
     // ring buffer with protection for overwrites
-    // TODO move implementation here
     template <typename T>
     class circular_buffer {
 
@@ -43,7 +42,7 @@ namespace experimental {
             boost::circular_buffer<T> cb_;
             std::unique_ptr<lock_and_wait_strategy> lws_;
 
-    }; // end class circular_buffer
+    }; // class circular_buffer
 
 } // namespace experimental 
 } // namespace irods
