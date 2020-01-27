@@ -203,7 +203,7 @@ void doit(int thread_number, S3BucketContext *bucket_context, upload_manager_t *
     s3_transport tp1{seq, current_buffer_size, thread_count, file_size, 1, 1, *bucket_context, 
         *manager, thread_number==0, true};
 
-    odstream ds1{tp1, "test1"};
+    odstream ds1{tp1, filename.c_str()};
     ds1.write(current_buffer, current_buffer_size);
 
     printf("WRITE DONE FOR %d\n", seq);
