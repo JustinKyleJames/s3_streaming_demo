@@ -73,6 +73,7 @@ namespace irods::experimental::io
         int keyCount;
         s3Stat_t s3Stat;    /* should be a pointer if keyCount > 1 */
         S3BucketContext *pCtx; /* To enable more detailed error messages */
+        bool debug_flag;
     } callback_data_t;
 
     // Shared info between all s3_transport objects for a single data object.
@@ -124,6 +125,7 @@ namespace irods::experimental::io
         std::string              xml;
         long                     remaining;
         long                     offset;
+        bool                     debug_flag;
 
         S3Status                 status;            /* status returned by libs3 */
     } upload_manager_t;
@@ -140,6 +142,7 @@ namespace irods::experimental::io
         S3Status status;
         bool enable_md5;
         bool server_encrypt;
+        bool debug_flag;
     } multipart_data_t;
 
     static void StoreAndLogStatus (
@@ -148,31 +151,29 @@ namespace irods::experimental::io
         const char *function,
         const S3BucketContext *pCtx,
         S3Status *pStatus,
-        bool debug_flag = true )
+        bool debug_flag = false )
     {
         int i;
 
         *pStatus = status;
-        if( status != S3StatusOK ) {
+        if( debug_flag || status != S3StatusOK ) {
             printf( "  S3Status: [%s] - %d\n", S3_get_status_name( status ), (int) status );
             printf( "    S3Host: %s\n", pCtx->hostName );
         }
 
-        if (debug_flag) {
-            if (status != S3StatusOK && function )
-                printf( "  Function: %s\n", function );
-            if (error && error->message)
-                printf( "  Message: %s\n", error->message);
-            if (error && error->resource)
-                printf( "  Resource: %s\n", error->resource);
-            if (error && error->furtherDetails)
-                printf( "  Further Details: %s\n", error->furtherDetails);
-            if (error && error->extraDetailsCount) {
-                printf( "%s", "  Extra Details:\n");
+        if ((debug_flag || status != S3StatusOK) && function )
+            printf( "  Function: %s\n", function );
+        if ((debug_flag || error) && error->message)
+            printf( "  Message: %s\n", error->message);
+        if ((debug_flag || error) && error->resource)
+            printf( "  Resource: %s\n", error->resource);
+        if ((debug_flag || error) && error->furtherDetails)
+            printf( "  Further Details: %s\n", error->furtherDetails);
+        if ((debug_flag || error) && error->extraDetailsCount) {
+            printf( "%s", "  Extra Details:\n");
 
-                for (i = 0; i < error->extraDetailsCount; i++) {
-                    printf( "    %s: %s\n", error->extraDetails[i].name, error->extraDetails[i].value);
-                }
+            for (i = 0; i < error->extraDetailsCount; i++) {
+                printf( "    %s: %s\n", error->extraDetails[i].name, error->extraDetails[i].value);
             }
         }
     }  // end StoreAndLogStatus
@@ -199,7 +200,7 @@ namespace irods::experimental::io
         void *callbackData)
     {
         upload_manager_t *data = (upload_manager_t*)callbackData;
-        StoreAndLogStatus( status, error, __FUNCTION__, data->pCtx, &(data->status) );
+        StoreAndLogStatus( status, error, __FUNCTION__, data->pCtx, &(data->status), data->debug_flag );
     } // end mpuInitRespCompCB
 
 
@@ -236,7 +237,7 @@ namespace irods::experimental::io
         void *callbackData)
     {
         upload_manager_t *data = (upload_manager_t*)callbackData;
-        StoreAndLogStatus( status, error, __FUNCTION__, data->pCtx, &(data->status) );
+        StoreAndLogStatus( status, error, __FUNCTION__, data->pCtx, &(data->status), data->debug_flag );
         // Don't change the global error, we may want to retry at a higher level.
         // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
     } // end mpuCommitRespCompCB
@@ -314,9 +315,7 @@ namespace irods::experimental::io
         void *callbackData)
     {
         multipart_data_t *data = (multipart_data_t *)callbackData;
-
-        // TODO use _debug_flag here
-        StoreAndLogStatus( status, error, __FUNCTION__, data->put_object_data.pCtx, &(data->status), false );
+        StoreAndLogStatus( status, error, __FUNCTION__, data->put_object_data.pCtx, &(data->status), data->debug_flag);
 
         // Don't change the global error, we may want to retry at a higher level.
         // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
@@ -340,7 +339,7 @@ namespace irods::experimental::io
         void *callbackData)
     {
         S3Status *pStatus = (S3Status*)&g_mpuCancelRespCompCB_status;
-        StoreAndLogStatus( status, error, __FUNCTION__, g_mpuCancelRespCompCB_pCtx, pStatus );
+        StoreAndLogStatus( status, error, __FUNCTION__, g_mpuCancelRespCompCB_pCtx, pStatus, false );
         // Don't change the global error, we may want to retry at a higher level.
         // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
     } // end mpuCancelRespCompCB
@@ -423,7 +422,10 @@ namespace irods::experimental::io
                               size_t _object_size,
                               size_t _retry_count_limit,
                               size_t _retry_wait,
-                              S3BucketContext& _bucket_context,
+                              const std::string& _hostname,
+                              const std::string& _bucket_name,
+                              const std::string& _access_key,
+                              const std::string& _secret_access_key,
                               upload_manager_t& _upload_manager,
                               bool _initiate_multipart,
                               bool _debug_flag = false)
@@ -437,7 +439,10 @@ namespace irods::experimental::io
             , object_size_{_object_size}
             , retry_count_limit_{_retry_count_limit}
             , retry_wait_{_retry_wait}
-            , bucket_context_{_bucket_context}
+            , hostname_{_hostname}
+            , bucket_name_{_bucket_name}
+            , access_key_{_access_key}
+            , secret_access_key_{_secret_access_key}
             , upload_manager_{_upload_manager}
             , initiate_multipart_{_initiate_multipart}
             , debug_flag_{_debug_flag}
@@ -455,6 +460,19 @@ namespace irods::experimental::io
             mpu_data_.server_encrypt = s3GetServerEncrypt();
 
             memset(&put_props_, 0, sizeof(put_props_));
+
+            upload_manager_.debug_flag = debug_flag_;
+            mpu_data_.debug_flag = debug_flag_;
+
+            bucket_context_.hostName        = hostname_.c_str();
+            bucket_context_.bucketName      = bucket_name_.c_str();
+            bucket_context_.accessKeyId     = access_key_.c_str();
+            bucket_context_.secretAccessKey = secret_access_key_.c_str();
+
+            // TODO pass in as args
+            bucket_context_.protocol         = S3ProtocolHTTP;
+            bucket_context_.stsDate          = S3STSAmzOnly;
+            bucket_context_.uriStyle         = S3UriStylePath;
         }
 
         ~s3_transport() {
@@ -465,7 +483,6 @@ namespace irods::experimental::io
             }
             if (put_props_.md5) free( (char*)put_props_.md5 );
         }
-
 
 
         bool open(const irods::experimental::filesystem::path& _p,
@@ -506,8 +523,10 @@ namespace irods::experimental::io
 
         bool close(const on_close_success* _on_close_success = nullptr) override
         {
-            begin_part_upload_thread_ptr_->join();
-            begin_part_upload_thread_ptr_ = nullptr;
+            if (begin_part_upload_thread_ptr_) {
+                begin_part_upload_thread_ptr_->join();
+                begin_part_upload_thread_ptr_ = nullptr;
+            }
 
             fd_ = uninitialized_file_descriptor;
 
@@ -554,6 +573,8 @@ namespace irods::experimental::io
 
                     if (ret < 0) {
                         // TODO what to return on error
+                        upload_manager_.last_error = ret;
+                        upload_manager_.multipart_condition_variable.notify_all();
                         return ret;
 
                     }
@@ -565,7 +586,12 @@ namespace irods::experimental::io
                 // TODO this assumes we're doing multipart, pass in a multipart cutoff size
                 std::unique_lock<std::mutex> lock(upload_manager_.multipart_mutex);
                 upload_manager_.multipart_condition_variable.wait(lock, [this] {
-                        return upload_manager_.initiate_multipart_done_flag; });
+                        return upload_manager_.initiate_multipart_done_flag || upload_manager_.last_error < 0; });
+
+                // if we got an error on initiation, don't complete just return the error 
+                if (upload_manager_.last_error < 0) {
+                    return upload_manager_.last_error;
+                }
             }
 
 
@@ -806,6 +832,7 @@ namespace irods::experimental::io
             callback_data_t data;
             memset(&data, 0, sizeof(data));
             data.contentLength = data.originalContentLength = object_size_;
+            data.debug_flag = debug_flag_;
 
             // Allocate all dynamic storage now, so we don't start a job we can't finish later
             //manager.etags = (char**)calloc(sizeof(char*) * totalParts, 1);
@@ -976,6 +1003,7 @@ namespace irods::experimental::io
                 // of an upload.  If we updated in-place, on a retry the part would start
                 // at the wrong offset and length.
                 partData = mpu_data_;
+                partData.debug_flag = debug_flag_;
                 partData.seq = sequence_;
                 partData.put_object_data.pCtx = &bucket_context_;
                 partData.put_object_data.original_bytes_ptr = partData.put_object_data.bytes = page.buffer;
@@ -1042,8 +1070,12 @@ namespace irods::experimental::io
         size_t            object_size_;
         size_t            retry_count_limit_;
         size_t            retry_wait_;
+        std::string       hostname_;
+        std::string       bucket_name_;
+        std::string       access_key_;
+        std::string       secret_access_key_;
         std::string       object_key_;
-        S3BucketContext&  bucket_context_;
+        S3BucketContext   bucket_context_;
         upload_manager_t& upload_manager_;
 
         bool              initiate_multipart_;

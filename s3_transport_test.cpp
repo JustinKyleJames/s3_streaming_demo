@@ -14,11 +14,13 @@ using s3_transport      = irods::experimental::io::s3_transport<char>;
 using upload_manager_t  = irods::experimental::io::upload_manager_t;
 
 
-void doit(int thread_number, S3BucketContext *bucket_context, upload_manager_t *manager, 
-    const int thread_count, const size_t file_size,
-    const bool debug_flag, const std::string& filename); 
+void doit(int thread_number, upload_manager_t *manager, 
+    const int thread_count, const size_t file_size, const bool debug_flag, 
+    const char *hostname, const char *bucket_name, const char *access_key, 
+    const char *secret_access_key, const char *filename);
 
-int main(int argc, char **argv) { 
+int main(int argc, char **argv) 
+{ 
 
     if (3 != argc) { 
         std::cerr << "Usage:  s3_transport_test <config_file> <upload_file>" << std::endl;
@@ -83,8 +85,8 @@ int main(int argc, char **argv) {
     bool debug_flag = json_is_true(debug_flag_json_object) ? true : false;
 
     // AWS
-    std::string key_id;
     std::string access_key;
+    std::string secret_access_key;
 
     // open and read keyfile
     std::ifstream key_ifs;
@@ -95,12 +97,12 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    if (!std::getline(key_ifs, key_id)) {
-        std::cerr << "Key file does not have a key_id." << std::endl;
+    if (!std::getline(key_ifs, access_key)) {
+        std::cerr << "Key file does not have a access_key." << std::endl;
         return 1;
     }
-    if (!std::getline(key_ifs, access_key)) {
-        std::cerr << "Key file does not have an access_key." << std::endl;
+    if (!std::getline(key_ifs, secret_access_key)) {
+        std::cerr << "Key file does not have an secret_access_key." << std::endl;
         return 1;
     }
 
@@ -109,7 +111,7 @@ int main(int argc, char **argv) {
     upload_manager_t        manager{upload_manager_mtx, upload_manager_cv};
 
 
-    S3BucketContext bucket_context;
+    /*S3BucketContext bucket_context;
     bucket_context.hostName = hostname.c_str(); 
     bucket_context.bucketName = bucket_name.c_str(); 
     bucket_context.protocol = S3ProtocolHTTP;
@@ -117,7 +119,7 @@ int main(int argc, char **argv) {
     bucket_context.uriStyle = S3UriStylePath;
     bucket_context.accessKeyId = key_id.c_str(); 
     bucket_context.secretAccessKey = access_key.c_str();
-    bucket_context.securityToken = nullptr;
+    bucket_context.securityToken = nullptr;*/
 
     // determine file size 
     size_t file_size;
@@ -137,8 +139,9 @@ int main(int argc, char **argv) {
         if (debug_flag) {
             printf("%s:%d (%s) start thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
         }
-        writer_threads[thread_number] = std::move(std::thread(doit, thread_number, &bucket_context, &manager, 
-                    thread_count, file_size, debug_flag, filename));
+        writer_threads[thread_number] = std::move(std::thread(doit, thread_number, &manager, 
+                    thread_count, file_size, debug_flag, hostname.c_str(), bucket_name.c_str(), 
+                    access_key.c_str(), secret_access_key.c_str(), filename.c_str()));
     }
 
 
@@ -158,9 +161,11 @@ int main(int argc, char **argv) {
 
 }
 
-void doit(int thread_number, S3BucketContext *bucket_context, upload_manager_t *manager, 
-    const int thread_count, const size_t file_size, 
-    const bool debug_flag, const std::string& filename) { 
+void doit(int thread_number, upload_manager_t *manager, 
+    const int thread_count, const size_t file_size, const bool debug_flag, 
+    const char *hostname, const char *bucket_name, const char *access_key, 
+    const char *secret_access_key, const char *filename) 
+{ 
 
     int seq = thread_number + 1;
 
@@ -181,7 +186,7 @@ void doit(int thread_number, S3BucketContext *bucket_context, upload_manager_t *
 
     ifs.open(filename, std::ios::in | std::ios::binary | std::ios::ate); 
     if (!ifs.good()) {
-        fprintf(stderr, "failed to open file %s\n", filename.c_str());
+        fprintf(stderr, "failed to open file %s\n", filename);
         return;
     }
 
@@ -193,17 +198,18 @@ void doit(int thread_number, S3BucketContext *bucket_context, upload_manager_t *
     ifs.read((char*)(current_buffer), current_buffer_size);
 
     if (debug_flag) {
-        printf("%s:%d (%s) [thread=%u, seq=%u] done reading file\n", __FILE__, __LINE__, __FUNCTION__, thread_number, seq);
+        printf("%s:%d (%s) [thread=%u, seq=%u] done reading file\n", __FILE__, __LINE__, __FUNCTION__, 
+                thread_number, seq);
     }
 
     /*****************************************
      * This part actually goes in S3 plugin. *
      *****************************************/
 
-    s3_transport tp1{seq, current_buffer_size, thread_count, file_size, 1, 1, *bucket_context, 
-        *manager, thread_number==0, true};
+    s3_transport tp1{seq, current_buffer_size, thread_count, file_size, 1, 1, hostname, bucket_name, access_key, 
+        secret_access_key, *manager, thread_number==0, true};
 
-    odstream ds1{tp1, filename.c_str()};
+    odstream ds1{tp1, filename};
     ds1.write(current_buffer, current_buffer_size);
 
     printf("WRITE DONE FOR %d\n", seq);
