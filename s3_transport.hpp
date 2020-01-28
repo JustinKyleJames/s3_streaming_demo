@@ -19,6 +19,8 @@
 #include <condition_variable>
 #include <new>
 
+#include <boost/algorithm/string/predicate.hpp>
+
 #include <libs3.h>
 
 namespace irods::experimental::io
@@ -428,6 +430,9 @@ namespace irods::experimental::io
                               const std::string& _secret_access_key,
                               upload_manager_t& _upload_manager,
                               bool _initiate_multipart,
+                              const std::string& _s3_signature_version_str,
+                              const std::string& _s3_protocol_str = "http",
+                              const std::string& _s3_sts_data_str = "amz",
                               bool _debug_flag = false)
 
 
@@ -469,10 +474,28 @@ namespace irods::experimental::io
             bucket_context_.accessKeyId     = access_key_.c_str();
             bucket_context_.secretAccessKey = secret_access_key_.c_str();
 
-            // TODO pass in as args
-            bucket_context_.protocol         = S3ProtocolHTTP;
-            bucket_context_.stsDate          = S3STSAmzOnly;
-            bucket_context_.uriStyle         = S3UriStylePath;
+           
+            if (_s3_signature_version_str == "4" || boost::iequals(_s3_signature_version_str, "V4")) {
+                s3_signature_version_       = S3SignatureV4;
+            } else {
+                s3_signature_version_       = S3SignatureV2;
+            }
+
+            if (boost::iequals(_s3_protocol_str, "http")) {
+                bucket_context_.protocol    = S3ProtocolHTTP;
+            } else {
+                bucket_context_.protocol    = S3ProtocolHTTPS;
+            }
+
+            if (boost::iequals(_s3_sts_data_str, "date")) {
+                bucket_context_.stsDate     = S3STSDateOnly;
+            } else if (boost::iequals(_s3_sts_data_str, "both")) {
+                bucket_context_.stsDate     = S3STSAmzAndDate;
+            } else {
+                bucket_context_.stsDate     = S3STSAmzOnly;
+            }
+
+            bucket_context_.uriStyle        = S3UriStylePath;
         }
 
         ~s3_transport() {
@@ -799,8 +822,9 @@ namespace irods::experimental::io
         {
             int flags = S3_INIT_ALL;
 
-            // TODO signature version as an argument
-            flags |= S3_INIT_SIGNATURE_V4;
+            if (s3_signature_version_ == S3SignatureV4) {
+                flags |= S3_INIT_SIGNATURE_V4;
+            }
 
             int status = S3_initialize( "s3", flags, bucket_context_.hostName );
             if (status != S3StatusOK) {
@@ -1062,31 +1086,33 @@ namespace irods::experimental::io
             }
         }
 
-        int               sequence_;       // for multiparts, the creator must specify which sequence is being used
-        size_t            part_size_;      // for multiparts, the creator must specify the part size
-        int               fd_;
-        nlohmann::json    fd_info_;
-        int               total_parts_;
-        size_t            object_size_;
-        size_t            retry_count_limit_;
-        size_t            retry_wait_;
-        std::string       hostname_;
-        std::string       bucket_name_;
-        std::string       access_key_;
-        std::string       secret_access_key_;
-        std::string       object_key_;
-        S3BucketContext   bucket_context_;
-        upload_manager_t& upload_manager_;
+        int                sequence_;       // for multiparts, the creator must specify which sequence is being used
+        size_t             part_size_;      // for multiparts, the creator must specify the part size
+        int                fd_;
+        nlohmann::json     fd_info_;
+        int                total_parts_;
+        size_t             object_size_;
+        size_t             retry_count_limit_;
+        size_t             retry_wait_;
+        std::string        hostname_;
+        std::string        bucket_name_;
+        std::string        access_key_;
+        std::string        secret_access_key_;
+        std::string        object_key_;
+        S3BucketContext    bucket_context_;
+        upload_manager_t&  upload_manager_;
+        S3SignatureVersion s3_signature_version_;
 
-        bool              initiate_multipart_;
-        bool              debug_flag_;
-        multipart_data_t  mpu_data_;
-        bool              call_s3_upload_part_flag_;
-        S3PutProperties   put_props_;
+        bool               initiate_multipart_;
+        bool               debug_flag_;
+        multipart_data_t   mpu_data_;
+        bool               call_s3_upload_part_flag_;
+        S3PutProperties    put_props_;
 
         irods::experimental::circular_buffer<upload_page_t>
                           circular_buffer_;
         std::thread       *begin_part_upload_thread_ptr_;
+
 
         // TODO do i need a file descriptor?
         inline static int file_descriptor_counter_ = minimum_valid_file_descriptor;

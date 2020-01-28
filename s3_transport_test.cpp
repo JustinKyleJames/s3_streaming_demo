@@ -207,7 +207,7 @@ void doit(int thread_number, upload_manager_t *manager,
      *****************************************/
 
     s3_transport tp1{seq, current_buffer_size, thread_count, file_size, 1, 1, hostname, bucket_name, access_key, 
-        secret_access_key, *manager, thread_number==0, true};
+        secret_access_key, *manager, thread_number==0, "V4", "http", "amz", true};
 
     odstream ds1{tp1, filename};
     ds1.write(current_buffer, current_buffer_size);
