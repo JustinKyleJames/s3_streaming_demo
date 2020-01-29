@@ -83,10 +83,9 @@ namespace irods::experimental::io
     {
         upload_manager(std::mutex& multipart_mutex_, std::condition_variable& multipart_condition_variable_)
             : multipart_mutex{multipart_mutex_}
-            , multipart_condition_variable{multipart_condition_variable_}
+            , file_open_cntr(0)
             , multipart_upload_flag(false)
             , multipart_download_flag(false)
-            , count_parts_complete(0)
             , upload_id{""}
             , pCtx{nullptr}
             , xml{""}
@@ -94,28 +93,12 @@ namespace irods::experimental::io
         {
         }
 
-        int increment_count_parts_complete() {
-
-            std::lock_guard<std::mutex> lg(multipart_mutex);
-            return ++count_parts_complete;
-        }
-
-        int get_count_parts_complete() {
-
-            std::lock_guard<std::mutex> lg(multipart_mutex);
-            return count_parts_complete;
-        }
-
         std::mutex&              multipart_mutex;   /* Used to protect the members as this struct is meant
                                                        to be shared among multiple threads. */
 
-        std::condition_variable& multipart_condition_variable;  /* Used to coordinate multipart initiation and
-                                                                   completion actions.  */
-
-        bool                     initiate_multipart_done_flag;
+        int                      file_open_cntr;
         bool                     multipart_upload_flag;
         bool                     multipart_download_flag;
-        int                      count_parts_complete;
 
         std::string              upload_id;         /* Returned from S3 on MP begin */
         std::vector<std::string> etags;
@@ -429,7 +412,6 @@ namespace irods::experimental::io
                               const std::string& _access_key,
                               const std::string& _secret_access_key,
                               upload_manager_t& _upload_manager,
-                              bool _initiate_multipart,
                               const std::string& _s3_signature_version_str,
                               const std::string& _s3_protocol_str = "http",
                               const std::string& _s3_sts_data_str = "amz",
@@ -449,7 +431,6 @@ namespace irods::experimental::io
             , access_key_{_access_key}
             , secret_access_key_{_secret_access_key}
             , upload_manager_{_upload_manager}
-            , initiate_multipart_{_initiate_multipart}
             , debug_flag_{_debug_flag}
             , fd_{uninitialized_file_descriptor}
             , fd_info_{}
@@ -467,6 +448,9 @@ namespace irods::experimental::io
             memset(&put_props_, 0, sizeof(put_props_));
 
             upload_manager_.debug_flag = debug_flag_;
+
+            // TODO calculate this
+            upload_manager_.multipart_upload_flag = true;
             mpu_data_.debug_flag = debug_flag_;
 
             bucket_context_.hostName        = hostname_.c_str();
@@ -474,7 +458,7 @@ namespace irods::experimental::io
             bucket_context_.accessKeyId     = access_key_.c_str();
             bucket_context_.secretAccessKey = secret_access_key_.c_str();
 
-           
+
             if (_s3_signature_version_str == "4" || boost::iequals(_s3_signature_version_str, "V4")) {
                 s3_signature_version_       = S3SignatureV4;
             } else {
@@ -546,22 +530,42 @@ namespace irods::experimental::io
 
         bool close(const on_close_success* _on_close_success = nullptr) override
         {
-            if (begin_part_upload_thread_ptr_) {
-                begin_part_upload_thread_ptr_->join();
-                begin_part_upload_thread_ptr_ = nullptr;
+            if (!is_open()) {
+                return false;
             }
 
-            fd_ = uninitialized_file_descriptor;
+            if (debug_flag_) {
+                printf("%s:%d (%s) [multipart_upload_flag=%d]\n", __FILE__, __LINE__, __FUNCTION__,
+                        upload_manager_.multipart_upload_flag);
+            }
 
-            // last one will close
-            int parts_complete = upload_manager_.get_count_parts_complete();
+            if (upload_manager_.multipart_upload_flag) {
 
-            if (parts_complete == total_parts_  && upload_manager_.last_error == 0) {
+                // upload was in background.  wait for it to complete.
+                if (begin_part_upload_thread_ptr_) {
+                    begin_part_upload_thread_ptr_->join();
+                    begin_part_upload_thread_ptr_ = nullptr;
+                }
 
-                int ret = complete_multipart_upload();
+                if (debug_flag_) {
+                    printf("%s:%d (%s) join for part %d\n", __FILE__, __LINE__, __FUNCTION__, sequence_);
+                }
 
-                if (ret < 0) {
-                    return false;
+
+                std::lock_guard<std::mutex> lock(upload_manager_.multipart_mutex);
+                fd_ = uninitialized_file_descriptor;
+                --(upload_manager_.file_open_cntr);
+                if (debug_flag_) {
+                    printf("%s:%d (%s) [file_open_cntr=%d]\n", __FILE__, __LINE__, __FUNCTION__,
+                            upload_manager_.file_open_cntr);
+                }
+
+                if (upload_manager_.file_open_cntr == 0) {
+                    int ret = complete_multipart_upload();
+
+                    if (ret < 0) {
+                        return false;
+                    }
                 }
             }
 
@@ -586,37 +590,6 @@ namespace irods::experimental::io
 
         std::streamsize send(const char_type* _buffer, std::streamsize _buffer_size) override
         {
-
-            if (initiate_multipart_) {
-                {
-                    std::lock_guard<std::mutex> lock(upload_manager_.multipart_mutex);
-
-                    // send initiate message to S3
-                    int ret = initiate_multipart_upload();
-
-                    if (ret < 0) {
-                        // TODO what to return on error
-                        upload_manager_.last_error = ret;
-                        upload_manager_.multipart_condition_variable.notify_all();
-                        return ret;
-
-                    }
-                    upload_manager_.multipart_upload_flag = true;
-                    upload_manager_.initiate_multipart_done_flag = true;
-                }
-                upload_manager_.multipart_condition_variable.notify_all();
-            } else {
-                // TODO this assumes we're doing multipart, pass in a multipart cutoff size
-                std::unique_lock<std::mutex> lock(upload_manager_.multipart_mutex);
-                upload_manager_.multipart_condition_variable.wait(lock, [this] {
-                        return upload_manager_.initiate_multipart_done_flag || upload_manager_.last_error < 0; });
-
-                // if we got an error on initiation, don't complete just return the error 
-                if (upload_manager_.last_error < 0) {
-                    return upload_manager_.last_error;
-                }
-            }
-
 
             // Put the buffer on the circular buffer.
             // We must copy the buffer because it will persist after send returns.
@@ -752,6 +725,40 @@ namespace irods::experimental::io
         {
 
             object_key_ = _p.string();
+
+            if (debug_flag_) {
+                printf("%s:%d (%s) [multipart_upload_flag=%d]\n", __FILE__, __LINE__, __FUNCTION__,
+                        upload_manager_.multipart_upload_flag);
+            }
+
+            if (upload_manager_.multipart_upload_flag)
+            {
+                std::lock_guard<std::mutex> lock(upload_manager_.multipart_mutex);
+                ++(upload_manager_.file_open_cntr);
+
+                if (debug_flag_) {
+                    printf("%s:%d (%s) [file_open_cntr=%d]\n", __FILE__, __LINE__, __FUNCTION__,
+                            upload_manager_.file_open_cntr);
+                }
+
+                // first one in initiates the multipart
+                if (upload_manager_.last_error >= 0 && upload_manager_.file_open_cntr == 1) {
+
+                    // send initiate message to S3
+                    int ret = initiate_multipart_upload();
+
+                    if (ret < 0) {
+                        // TODO what to return on error
+                        upload_manager_.last_error = ret;
+                        return ret;
+                    }
+                } else {
+                    if (upload_manager_.last_error < 0) {
+                        return upload_manager_.last_error;
+                    }
+                }
+            }
+
             const auto flags = make_open_flags(_mode);
 
             if (flags == translation_error) {
@@ -874,13 +881,14 @@ namespace irods::experimental::io
                 upload_manager_.pCtx = &bucket_context_;
                 print_bucket_context(bucket_context_);
                 if (debug_flag_) {
-                    printf("%s:%d (%s) [part=%d] call S3_initiate_multipart\n", __FILE__, __LINE__, __FUNCTION__, sequence_);
+                    printf("%s:%d (%s) [part=%d] call S3_initiate_multipart [object_key=%s]\n",
+                            __FILE__, __LINE__, __FUNCTION__, sequence_, object_key_.c_str());
                 }
-                S3_initiate_multipart(&bucket_context_, object_key_.c_str(), &put_props_, &mpuInitialHandler, 
+                S3_initiate_multipart(&bucket_context_, object_key_.c_str(), &put_props_, &mpuInitialHandler,
                         nullptr, &upload_manager_);
 
                 if (upload_manager_.status != S3StatusOK) s3_sleep( retry_wait_, 0 );
-            } while ( (upload_manager_.status != S3StatusOK) && S3_status_is_retryable(upload_manager_.status) 
+            } while ( (upload_manager_.status != S3StatusOK) && S3_status_is_retryable(upload_manager_.status)
                     && ( ++retry_cnt < retry_count_limit_));
 
             if ("" == upload_manager_.upload_id || upload_manager_.status != S3StatusOK) {
@@ -889,7 +897,7 @@ namespace irods::experimental::io
             }
 
             if (debug_flag_) {
-                printf("%s:%d (%s) [part=%d] S3_initiate_multipart returned.  Upload ID = %s\n", 
+                printf("%s:%d (%s) [part=%d] S3_initiate_multipart returned.  Upload ID = %s\n",
                         __FILE__, __LINE__, __FUNCTION__, sequence_, upload_manager_.upload_id.c_str());
             }
             upload_manager_.remaining = 0;
@@ -955,7 +963,7 @@ namespace irods::experimental::io
                 }
                 xml << "</CompleteMultipartUpload>\n";
 
-                int manager_remaining = xml.str().size(); 
+                int manager_remaining = xml.str().size();
                 upload_manager_.offset = 0;
                 retry_cnt = 0;
                 S3MultipartCommitHandler commit_handler = { {mpuCommitRespPropCB, mpuCommitRespCompCB }, mpuCommitXmlCB, nullptr };
@@ -966,7 +974,7 @@ namespace irods::experimental::io
 
                     upload_manager_.offset = 0;
                     upload_manager_.pCtx = &bucket_context_;
-                    S3_complete_multipart_upload(&bucket_context_, object_key_.c_str(), &commit_handler, 
+                    S3_complete_multipart_upload(&bucket_context_, object_key_.c_str(), &commit_handler,
                             upload_manager_.upload_id.c_str(), upload_manager_.remaining, nullptr, &upload_manager_);
                     if (debug_flag_) {
                         printf("%s:%d (%s) [manager.status=%s]\n", __FILE__, __LINE__, __FUNCTION__,
@@ -1038,7 +1046,7 @@ namespace irods::experimental::io
 
                 if (debug_flag_) {
                     std::stringstream msg;
-                    msg << "Multipart:  Start part " << (int)sequence_ << ", key \"" << object_key_ << "\", uploadid \"" 
+                    msg << "Multipart:  Start part " << (int)sequence_ << ", key \"" << object_key_ << "\", uploadid \""
                         << upload_manager_.upload_id << "\", len " << (int)partData.put_object_data.contentLength;
                     printf( "%s:%d (%s) %s\n", __FILE__, __LINE__, __FUNCTION__, msg.str().c_str() );
                 }
@@ -1047,7 +1055,7 @@ namespace irods::experimental::io
                 //S3PutProperties putProps;
                 //if ( partData.enable_md5 ) {
                 //    // jjames - not sure how to do MD5 piecewise
-                //    putProps->md5 = s3CalcMD5( partData.put_object_data.fd, partData.put_object_data.offset, 
+                //    putProps->md5 = s3CalcMD5( partData.put_object_data.fd, partData.put_object_data.offset,
                 //    partData.put_object_data.contentLength, resource_name );
                 //}
                 put_props_.expires = -1;
@@ -1058,19 +1066,15 @@ namespace irods::experimental::io
                             __FILE__, __LINE__, __FUNCTION__, sequence_, partData.put_object_data.contentLength);
                 }
 
-                S3_upload_part(&bucket_context_, object_key_.c_str(), &put_props_, &putObjectHandler, sequence_, 
+                S3_upload_part(&bucket_context_, object_key_.c_str(), &put_props_, &putObjectHandler, sequence_,
                         upload_manager_.upload_id.c_str(), part_size_, 0, &partData);
 
-                //upload_manager_.count_parts_complete++;
-                int parts_complete = upload_manager_.increment_count_parts_complete();
- 
                 if (debug_flag_) {
-                    printf("%s:%d (%s) S3_upload_part returned. [count_parts_complete=%d]\n", __FILE__, __LINE__, __FUNCTION__,
-                           upload_manager_.count_parts_complete );
+                    printf("%s:%d (%s) S3_upload_part returned [part=%d].\n", __FILE__, __LINE__, __FUNCTION__, sequence_);
                 }
 
                 unsigned long long usEnd = usNow();
-                //double bw = (mpu_data_[seq-1].put_object_data.contentLength / (1024.0 * 1024.0)) / 
+                //double bw = (mpu_data_[seq-1].put_object_data.contentLength / (1024.0 * 1024.0)) /
                 //   ( (usEnd - usStart) / 1000000.0 );
                 if (debug_flag_) {
                     std::stringstream msg;
@@ -1078,7 +1082,7 @@ namespace irods::experimental::io
                     printf( "%s:%d (%s) %s\n", __FILE__, __LINE__, __FUNCTION__, msg.str().c_str() );
                 }
                 if (partData.status != S3StatusOK) s3_sleep( retry_wait_, 0 );
-            } while ((partData.status != S3StatusOK) && S3_status_is_retryable(partData.status) && 
+            } while ((partData.status != S3StatusOK) && S3_status_is_retryable(partData.status) &&
                     (++retry_cnt < retry_count_limit_));
 
             if (partData.status != S3StatusOK) {
@@ -1103,7 +1107,6 @@ namespace irods::experimental::io
         upload_manager_t&  upload_manager_;
         S3SignatureVersion s3_signature_version_;
 
-        bool               initiate_multipart_;
         bool               debug_flag_;
         multipart_data_t   mpu_data_;
         bool               call_s3_upload_part_flag_;
