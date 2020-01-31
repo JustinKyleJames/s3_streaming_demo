@@ -27,6 +27,16 @@ int main(int argc, char **argv)
         return 1; 
     }
 
+    // Remove shared memory on construction and destruction
+    struct shm_remove
+    {
+       shm_remove() { bi::shared_memory_object::remove("MySharedMemory"); }
+       ~shm_remove(){ bi::shared_memory_object::remove("MySharedMemory"); }
+    } remover;
+
+    //Create shared memory
+    bi::managed_shared_memory segment(bi::create_only,"MySharedMemory", 65536);
+
     std::string config_file = argv[1];
     std::string filename = argv[2];
     size_t multipart_size = transfer_buffer_size_for_parallel_transfer_in_megabytes*1024*1024;
