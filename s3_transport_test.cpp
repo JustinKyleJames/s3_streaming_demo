@@ -13,14 +13,20 @@ using odstream          = irods::experimental::io::odstream;
 using s3_transport      = irods::experimental::io::s3_transport<char>;
 using upload_manager_t  = irods::experimental::io::upload_manager_t;
 
-
-void doit(int thread_number, upload_manager_t *manager, 
-    const int thread_count, const size_t file_size, const bool debug_flag, 
-    const char *hostname, const char *bucket_name, const char *access_key, 
-    const char *secret_access_key, const char *filename);
+void doit(int thread_number, 
+          const int thread_count, 
+          const size_t file_size, 
+          const bool debug_flag, 
+          const char *hostname, 
+          const char *bucket_name, 
+          const char *access_key, 
+          const char *secret_access_key, 
+          const char *filename);
 
 int main(int argc, char **argv) 
 { 
+
+    namespace bi = boost::interprocess;
 
     if (3 != argc) { 
         std::cerr << "Usage:  s3_transport_test <config_file> <upload_file>" << std::endl;
@@ -118,8 +124,6 @@ int main(int argc, char **argv)
 
     std::mutex              upload_manager_mtx;
     std::condition_variable upload_manager_cv;
-    upload_manager_t        manager{upload_manager_mtx, upload_manager_cv};
-
 
     /*S3BucketContext bucket_context;
     bucket_context.hostName = hostname.c_str(); 
@@ -149,7 +153,7 @@ int main(int argc, char **argv)
         if (debug_flag) {
             printf("%s:%d (%s) start thread %d\n", __FILE__, __LINE__, __FUNCTION__, thread_number);
         }
-        writer_threads[thread_number] = std::move(std::thread(doit, thread_number, &manager, 
+        writer_threads[thread_number] = std::move(std::thread(doit, thread_number, 
                     thread_count, file_size, debug_flag, hostname.c_str(), bucket_name.c_str(), 
                     access_key.c_str(), secret_access_key.c_str(), filename.c_str()));
     }
@@ -171,10 +175,15 @@ int main(int argc, char **argv)
 
 }
 
-void doit(int thread_number, upload_manager_t *manager, 
-    const int thread_count, const size_t file_size, const bool debug_flag, 
-    const char *hostname, const char *bucket_name, const char *access_key, 
-    const char *secret_access_key, const char *filename) 
+void doit(int thread_number, 
+          const int thread_count, 
+          const size_t file_size, 
+          const bool debug_flag, 
+          const char *hostname, 
+          const char *bucket_name, 
+          const char *access_key, 
+          const char *secret_access_key, 
+          const char *filename) 
 { 
 
     int seq = thread_number + 1;
@@ -217,7 +226,7 @@ void doit(int thread_number, upload_manager_t *manager,
      *****************************************/
 
     s3_transport tp1{seq, current_buffer_size, thread_count, file_size, 1, 1, hostname, bucket_name, access_key, 
-        secret_access_key, *manager, "V4", "http", "amz", true};
+        secret_access_key, "V4", "http", "amz", true};
 
     odstream ds1{tp1, filename};
     ds1.write(current_buffer, current_buffer_size);
