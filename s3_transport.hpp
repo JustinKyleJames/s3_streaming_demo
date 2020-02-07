@@ -35,17 +35,62 @@
 #include <boost/interprocess/managed_shared_memory.hpp>
 #include <boost/interprocess/containers/string.hpp>
 #include <boost/interprocess/sync/named_mutex.hpp>
-#include <boost/interprocess/sync/named_upgradable_mutex.hpp>
 #include <boost/container/scoped_allocator.hpp>
 #include <boost/interprocess/sync/scoped_lock.hpp>
 #include <boost/algorithm/string.hpp>
-#include <boost/interprocess/sync/interprocess_mutex.hpp>
 
 
 namespace irods::experimental::io
 {
 
     namespace bi = boost::interprocess;
+
+    class scoped_lock_test {
+    public:
+    
+        scoped_lock_test(const std::string& _mutex_name,
+                    const char *_file, 
+                    int _line, 
+                    const char *_function)
+            : mutex_name{_mutex_name}
+            , file{_file}
+            , line{_line} 
+            , function{_function}
+            , named_mtx{nullptr}
+            , lock{nullptr}
+        {
+            if (file != nullptr && function != nullptr) { 
+                printf("%s:%d (%s) ---LOCK--- waiting for lock\n", file, line, function);
+            }
+
+            named_mtx = new bi::named_mutex(bi::open_or_create, mutex_name.c_str());
+            lock = new bi::scoped_lock<bi::named_mutex>(*named_mtx);
+
+            if (file != nullptr && function != nullptr) { 
+                printf("%s:%d (%s) ---LOCK--- acquired lock\n", file, line, function);
+            }
+        }
+
+        ~scoped_lock_test() 
+        {
+            if (file != nullptr && function != nullptr) { 
+                printf("%s:%d (%s) ---LOCK--- releasing lock\n", file, line, function);
+            }
+
+            delete lock;
+            delete named_mtx;
+
+        }
+    private:
+
+        std::string mutex_name;
+        bi::named_mutex *named_mtx;
+        bi::scoped_lock<bi::named_mutex> *lock;
+        const char *file; 
+        int line;
+        const char *function;
+    };
+
     
     typedef bi::managed_shared_memory::segment_manager           segment_manager_t;
     typedef boost::container::scoped_allocator_adaptor<
@@ -63,17 +108,15 @@ namespace irods::experimental::io
     {
         multipart_shared_data_t(const void_allocator &allocator)
             : file_open_cntr(0)
-            , multipart_upload_flag(false)
-            , multipart_download_flag(false)
             , upload_id(allocator)
+            , download_id(allocator)
             , etags(allocator)
             , last_error(0)  
         {} 
     
         int                      file_open_cntr;
-        bool                     multipart_upload_flag;
-        bool                     multipart_download_flag;
         shm_char_string_t        upload_id;
+        shm_char_string_t        download_id;
         shm_string_vector_t      etags;
         int                      last_error;
     };
@@ -83,11 +126,11 @@ namespace irods::experimental::io
             segment_manager_t>                                   multipart_shared_data_allocator;
     typedef std::pair<const shm_char_string_t, 
             multipart_shared_data_t>   map_value_type;
-    typedef bi::allocator<map_value_type, 
+    /*typedef bi::allocator<map_value_type, 
             segment_manager_t>                                   map_value_type_allocator;
     typedef bi::map<shm_char_string_t, multipart_shared_data_t, 
             std::less<shm_char_string_t>, 
-            map_value_type_allocator>                            file_to_shared_data_map_t;
+            map_value_type_allocator>                            multipart_shared_data_t;*/
 
     void print_bucket_context(S3BucketContext& bucket_context) 
     {
@@ -218,14 +261,19 @@ namespace irods::experimental::io
         upload_manager_t *manager = (upload_manager_t *)callbackData;
 
         // upload upload_id in shared memory
-        bi::managed_shared_memory segment(bi::open_or_create, "MySharedMemory", 65536);
         std::string& object_key = manager->object_key;
+
+        std::string shared_memory_name =  object_key + "-shm";
+        bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
+
         void_allocator alloc_inst(segment.get_segment_manager());
         shm_char_string_t key_str(object_key.c_str(), alloc_inst);
-        file_to_shared_data_map_t *shared_data_map = segment.find_or_construct<file_to_shared_data_map_t>
-                ("FileToSharedDataMap")(alloc_inst);
-        auto entry = shared_data_map->find(key_str);
-        entry->second.upload_id = upload_id;
+
+        // no need to lock as this should already be locked
+
+        multipart_shared_data_t *shared_data = segment.find_or_construct<multipart_shared_data_t>
+                ("SharedData")(alloc_inst);
+        shared_data->upload_id = upload_id;
 
         return S3StatusOK;
     } // end mpuInitXmlCB
@@ -282,6 +330,39 @@ namespace irods::experimental::io
         // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
     } // end mpuCommitRespCompCB
 
+    /*static S3Status getObjectDataCallback(int bufferSize, 
+                                          const char *buffer, 
+                                          void *callbackData)
+    {
+        callback_data_t *cb = (callback_data_t *)callbackData;
+        irods::plugin_property_map *prop_map_ptr = cb ? cb->prop_map_ptr : nullptr;
+        std::string resource_name = prop_map_ptr != nullptr ? get_resource_name(*prop_map_ptr) : "";
+    
+        irods::error result = ASSERT_ERROR(bufferSize != 0 && buffer != NULL && callbackData != NULL,
+                                           SYS_INVALID_INPUT_PARAM, "[resource_name=%s] Invalid input parameter.", resource_name.c_str() );
+        if(!result.ok()) {
+            irods::log(result);
+        }
+    
+        ssize_t wrote = pwrite(cb->fd, buffer, bufferSize, cb->offset);
+        if (wrote>0) cb->offset += wrote;
+    
+    #ifdef ERROR_INJECT
+        g_error_mutex.lock();
+        g_werr++;
+        if (g_werr == g_werr_idx) {
+            rodsLog(LOG_ERROR, "[resource_name=%s] Injecting a PWRITE error during S3 callback", resource_name.c_str() );
+            g_error_mutex.unlock();
+            return S3StatusAbortedByCallback;
+        }
+        g_error_mutex.unlock();
+    #endif
+    
+        return ((wrote < (ssize_t) bufferSize) ?
+                S3StatusAbortedByCallback : S3StatusOK);
+    }*/
+
+
     static int putObjectDataCallback(int libs3_buffer_size, 
                                      char *libs3_buffer, 
                                      void *callbackData)
@@ -336,26 +417,34 @@ namespace irods::experimental::io
     static S3Status mpuPartRespPropCB (const S3ResponseProperties *properties, 
                                        void *callbackData)
     {
+        // update etag for this object
+        
         multipart_data_t *data = (multipart_data_t *)callbackData;
 
-        // get shared memory record for this object
-        bi::managed_shared_memory segment(bi::open_or_create, "MySharedMemory", 65536);
         std::string& object_key = data->manager->object_key;
+
+        std::string shared_memory_name =  object_key + "-shm";
+        bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
         void_allocator alloc_inst(segment.get_segment_manager());
         shm_char_string_t key_str(object_key.c_str(), alloc_inst);
-        file_to_shared_data_map_t *shared_data_map = segment.find_or_construct<file_to_shared_data_map_t>
-                ("FileToSharedDataMap")(alloc_inst);
-        auto entry = shared_data_map->find(key_str);
-        std::string upload_id = entry->second.upload_id.c_str();
+
+        // lock for update
+        std::string mtx_name = object_key + "-mtx";
+        //bi::named_mutex named_mtx{bi::open_or_create, mtx_name.c_str()};
+        //bi::scoped_lock<bi::named_mutex> lock{named_mtx};
+        scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__);
+
+        multipart_shared_data_t *shared_data = segment.find_or_construct<multipart_shared_data_t>
+                ("SharedData")(alloc_inst);
 
         int seq = data->seq;
         const char *etag = properties->eTag;
 
         // update etags vector in shmem
         if (etag) {
-            entry->second.etags[seq - 1] = etag;
+            shared_data->etags[seq - 1] = etag;
         } else {
-            entry->second.etags[seq - 1] = "";
+            shared_data->etags[seq - 1] = "";
         }
 
         return S3StatusOK;
@@ -382,7 +471,6 @@ namespace irods::experimental::io
 
     // S3_abort_multipart_upload() does not allow a callbackData parameter, so pass the
     // final operation status using this global.
-    // TODO get rid of these globals
     static S3Status g_mpuCancelRespCompCB_status = S3StatusOK;
     static S3BucketContext *g_mpuCancelRespCompCB_pCtx = nullptr;
 
@@ -480,6 +568,7 @@ namespace irods::experimental::io
                               const std::string& _bucket_name,
                               const std::string& _access_key,
                               const std::string& _secret_access_key,
+                              bool _multipart_flag,
                               const std::string& _s3_signature_version_str,
                               const std::string& _s3_protocol_str = "http",
                               const std::string& _s3_sts_data_str = "amz",
@@ -496,12 +585,16 @@ namespace irods::experimental::io
             , bucket_name_{_bucket_name}
             , access_key_{_access_key}
             , secret_access_key_{_secret_access_key}
+            , multipart_flag_{_multipart_flag}
             , debug_flag_{_debug_flag}
             , fd_{uninitialized_file_descriptor}
             , fd_info_{}
             , call_s3_upload_part_flag_{true}
+            , call_s3_download_part_flag_{true}
             , begin_part_upload_thread_ptr_{nullptr}
+            , begin_part_download_thread_ptr_{nullptr}
             , circular_buffer_{1}
+            , mode_(0)
         {
 
 
@@ -548,10 +641,6 @@ namespace irods::experimental::io
 
             bucket_context_.uriStyle        = S3UriStylePath;
 
-            bi::managed_shared_memory segment(bi::open_or_create, "MySharedMemory", 65536);
-            void_allocator alloc_inst(segment.get_segment_manager());
-            file_to_shared_data_map_t *shared_data_map = segment.find_or_construct<file_to_shared_data_map_t>
-                ("FileToSharedDataMap")(alloc_inst);
         }
 
         ~s3_transport() {
@@ -560,6 +649,11 @@ namespace irods::experimental::io
                 begin_part_upload_thread_ptr_ -> join();
                 delete begin_part_upload_thread_ptr_;
             }
+            if (begin_part_download_thread_ptr_) {
+                begin_part_download_thread_ptr_ -> join();
+                delete begin_part_download_thread_ptr_;
+            }
+
             if (put_props_.md5) free( (char*)put_props_.md5 );
         }
 
@@ -606,17 +700,18 @@ namespace irods::experimental::io
                 return false;
             }
 
-            bi::managed_shared_memory segment(bi::open_or_create, "MySharedMemory", 65536);
-            void_allocator alloc_inst(segment.get_segment_manager());
-            shm_char_string_t key_str(object_key_.c_str(), alloc_inst);
-            file_to_shared_data_map_t *shared_data_map = segment.find_or_construct<file_to_shared_data_map_t>
-                ("FileToSharedDataMap")(alloc_inst);
-            auto entry = shared_data_map->find(key_str);
+            if (multipart_flag_ && (mode_ & std::ios_base::out)) {
 
-            if (entry != shared_data_map->end() && entry->second.multipart_upload_flag) {
+                std::string shared_memory_name =  object_key_ + "-shm";
+                bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
+
+                void_allocator alloc_inst(segment.get_segment_manager());
+                shm_char_string_t key_str(object_key_.c_str(), alloc_inst);
+                multipart_shared_data_t *shared_data = segment.find_or_construct<multipart_shared_data_t>
+                    ("SharedData")(alloc_inst);
 
                 if (debug_flag_) {
-                    printf("%s:%d (%s) [multipart_upload_flag=true]\n", 
+                    printf("%s:%d (%s) [multipart_flag=true]\n", 
                             __FILE__, __LINE__, __FUNCTION__);
                 }
 
@@ -634,10 +729,14 @@ namespace irods::experimental::io
                 fd_ = uninitialized_file_descriptor;
 
                 {
-                    // TODO lock 
+                    // lock for update
+                    std::string mtx_name = object_key_ + "-mtx";
+                    //bi::named_mutex named_mtx{bi::open_or_create, mtx_name.c_str()};
+                    //bi::scoped_lock<bi::named_mutex> lock{named_mtx};
+                    scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__);
 
                     // read number of opens for this key 
-                    int open_count = --(entry->second.file_open_cntr);
+                    int open_count = --(shared_data->file_open_cntr);
 
                     if (debug_flag_) {
                         printf("%s:%d (%s) [file_open_cntr=%d]\n", 
@@ -653,10 +752,78 @@ namespace irods::experimental::io
                             return false;
                         }
 
-                        // all files are closed.  delete entry from shmem
-                        shared_data_map->erase(key_str);
+
+                        bool remove_flag= bi::shared_memory_object::remove(shared_memory_name.c_str());
+                        if (!remove_flag) {
+                            fprintf(stderr, "%s:%d (%s) Failed to remove shared memory %s\n", 
+                                    __FILE__, __LINE__, __FUNCTION__, shared_memory_name.c_str());
+                        }
+
+                        remove_flag = bi::named_mutex::remove(mtx_name.c_str());
+                        if (!remove_flag) {
+                            fprintf(stderr, "%s:%d (%s) Failed to remove shared mutex %s\n", 
+                                    __FILE__, __LINE__, __FUNCTION__, mtx_name.c_str());
+                        }
                     }
                 }
+            } else if (multipart_flag_ && (mode_ & std::ios_base::in)) {
+
+                /*if (debug_flag_) {
+                    printf("%s:%d (%s) [multipart_flag=true]\n", 
+                            __FILE__, __LINE__, __FUNCTION__);
+                }
+
+                // download was in background.  wait for it to complete.
+                if (begin_part_download_thread_ptr_) {
+                    begin_part_download_thread_ptr_->join();
+                    begin_part_download_thread_ptr_ = nullptr;
+                }
+
+                if (debug_flag_) {
+                    printf("%s:%d (%s) join for part %d\n", 
+                            __FILE__, __LINE__, __FUNCTION__, sequence_);
+                }
+
+                fd_ = uninitialized_file_descriptor;
+
+                {
+                    // lock for update
+                    std::string mtx_name = object_key_ + "-mtx";
+                    //bi::named_mutex named_mtx{bi::open_or_create, mtx_name.c_str()};
+                    //bi::scoped_lock<bi::named_mutex> lock{named_mtx};
+                    scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__);
+
+                    // read number of opens for this key 
+                    int open_count = --(shared_data->file_open_cntr);
+
+                    if (debug_flag_) {
+                        printf("%s:%d (%s) [file_open_cntr=%d]\n", 
+                                __FILE__, __LINE__, __FUNCTION__,
+                                open_count);
+                    }
+
+                    if (open_count == 0) {
+
+                        int ret = complete_multipart_download();
+
+                        if (ret < 0) {
+                            return false;
+                        }
+
+
+                        bool remove_flag= bi::shared_memory_object::remove(shared_memory_name.c_str());
+                        if (!remove_flag) {
+                            fprintf(stderr, "%s:%d (%s) Failed to remove shared memory %s\n", 
+                                    __FILE__, __LINE__, __FUNCTION__, shared_memory_name.c_str());
+                        }
+
+                        remove_flag = bi::named_mutex::remove(mtx_name.c_str());
+                        if (!remove_flag) {
+                            fprintf(stderr, "%s:%d (%s) Failed to remove shared mutex %s\n", 
+                                    __FILE__, __LINE__, __FUNCTION__, mtx_name.c_str());
+                        }
+                    }
+                }*/
             }
 
             return true;
@@ -665,7 +832,8 @@ namespace irods::experimental::io
         std::streamsize receive(char_type* _buffer, 
                                 std::streamsize _buffer_size) override
         {
-            openedDataObjInp_t input{};
+            // TODO right now this assumes a full file get before filling the buffer
+            /*openedDataObjInp_t input{};
 
             input.l1descInx = fd_;
             input.len = _buffer_size;
@@ -675,8 +843,24 @@ namespace irods::experimental::io
             output.len = input.len;
             output.buf = _buffer;
 
+            // only call s3_upload_part once for this thread / part
+            if (call_s3_download_part_flag_) {
+
+                call_s3_download_part_flag_ = false;
+
+                // this has to go in the background because we are going to have multiple calls receive() to fill up the data
+                // and this doesn't return until all the data is sent
+                begin_part_upload_thread_ptr_ = 
+                    new std::thread(&s3_transport::s3_download_part_worker_routine, this);
+
+            }
+
+            // wait for download to fill cache file
+
+
             std::cout << "Received: " << output.buf << std::endl;
-            return output.len;
+            return output.len;*/
+            return 0;
         }
 
         std::streamsize send(const char_type* _buffer, 
@@ -702,7 +886,7 @@ namespace irods::experimental::io
                 // this has to go in the background because we are going to have multiple calls send() to fill up the data
                 // and this doesn't return until all the data is sent
                 begin_part_upload_thread_ptr_ = 
-                    new std::thread(&s3_transport::call_s3_upload_part, this);
+                    new std::thread(&s3_transport::s3_upload_part_worker_routine, this);
 
             }
 
@@ -821,56 +1005,57 @@ namespace irods::experimental::io
         {
             object_key_ = _p.string();
             upload_manager_.object_key = object_key_;
-            std::string mtx_name = object_key_ + "-mtx";
 
-            // first one end calls initiate, all else waits
-            bi::named_mutex named_mtx{bi::open_or_create, mtx_name.c_str()};
-            bi::scoped_lock<bi::named_mutex> lock{named_mtx};
+            mode_ = _mode;
 
-            bi::managed_shared_memory segment(bi::open_or_create, "MySharedMemory", 65536);
-            void_allocator alloc_inst(segment.get_segment_manager());
-            shm_char_string_t key_str(object_key_.c_str(), alloc_inst);
-            file_to_shared_data_map_t *shared_data_map = segment.find_or_construct <file_to_shared_data_map_t> 
-                ("FileToSharedDataMap")(alloc_inst);
-            auto entry = shared_data_map->find(key_str);
+            if (multipart_flag_) {
+                
+                std::string shared_memory_name =  object_key_ + "-shm";
+                bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
 
-            if (entry == shared_data_map->end()) {
-                // entry does not exist for this key, create it
-                multipart_shared_data_t d(alloc_inst);
-                d.multipart_upload_flag = true;
-                map_value_type mval(key_str, d); 
-                shared_data_map->insert(mval);
-                entry = shared_data_map->find(key_str);
-            }
+                void_allocator alloc_inst(segment.get_segment_manager());
+                shm_char_string_t key_str(object_key_.c_str(), alloc_inst);
 
-            if (entry->second.multipart_upload_flag)
-            {
-                if (debug_flag_) {
-                    printf("%s:%d (%s) [multipart_upload_flag=true]\n", __FILE__, __LINE__, 
-                            __FUNCTION__);
-                }
+                multipart_shared_data_t *shared_data = segment.find_or_construct <multipart_shared_data_t> 
+                    ("SharedData")(alloc_inst);
 
-                ++(entry->second.file_open_cntr);
+                // first one end calls initiate, all else waits
+                std::string mtx_name = object_key_ + "-mtx";
+                //bi::named_mutex named_mtx{bi::open_or_create, mtx_name.c_str()};
+                //bi::scoped_lock<bi::named_mutex> lock{named_mtx};
+                scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__);
 
-                if (debug_flag_) {
-                    printf("%s:%d (%s) [file_open_cntr=%d]\n", __FILE__, __LINE__, __FUNCTION__,
-                            entry->second.file_open_cntr);
-                }
-
-                // first one in initiates the multipart
-                if (entry->second.last_error >= 0 && entry->second.file_open_cntr == 1) {
-
-                    // send initiate message to S3
-                    int ret = initiate_multipart_upload();
-
-                    if (ret < 0) {
-                        entry->second.last_error = ret;
-                        return ret;
+                if (mode_ & std::ios_base::out)
+                {
+                    if (debug_flag_) {
+                        printf("%s:%d (%s) [multipart_flag=true]\n", __FILE__, __LINE__, 
+                                __FUNCTION__);
                     }
-                } else {
-                    if (entry->second.last_error < 0) {
-                        return entry->second.last_error;
+
+                    ++(shared_data->file_open_cntr);
+
+                    if (debug_flag_) {
+                        printf("%s:%d (%s) [file_open_cntr=%d]\n", __FILE__, __LINE__, __FUNCTION__,
+                                shared_data->file_open_cntr);
                     }
+
+                    // first one in initiates the multipart
+                    if (shared_data->last_error >= 0 && shared_data->file_open_cntr == 1) {
+
+                        // send initiate message to S3
+                        int ret = initiate_multipart_upload();
+
+                        if (ret < 0) {
+                            shared_data->last_error = ret;
+                            return ret;
+                        }
+                    } else {
+                        if (shared_data->last_error < 0) {
+                            return shared_data->last_error;
+                        }
+                    }
+                } else if (mode_ & std::ios_base::in) {
+
                 }
             }
 
@@ -880,13 +1065,6 @@ namespace irods::experimental::io
                 return false;
             }
 
-            dataObjInp_t input{};
-
-            input.createMode = 0600;
-            input.openFlags = flags;
-            rstrcpy(input.objPath, _p.c_str(), sizeof(input.objPath));
-
-            _func(input);
 
             const auto fd = file_descriptor_counter_++;
 
@@ -897,13 +1075,6 @@ namespace irods::experimental::io
             fd_ = fd;
 
             if (!seek_to_end_if_required(_mode)) {
-                close();
-                return false;
-            }
-
-            // TODO Calling rxDataObjOpen() should just return the file descriptor information
-            // to avoid an additional network call.
-            if (!capture_file_descriptor_info()) {
                 close();
                 return false;
             }
@@ -979,18 +1150,18 @@ namespace irods::experimental::io
             data.contentLength = data.originalContentLength = object_size_;
             data.debug_flag = debug_flag_;
 
-            // read shared memory entry for this key
-            bi::managed_shared_memory segment(bi::open_or_create, "MySharedMemory", 65536);
+            // read shared memory entry for this key (shmem already locked here)
+            std::string shared_memory_name =  object_key_ + "-shm";
+            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
+
             void_allocator alloc_inst(segment.get_segment_manager());
             shm_char_string_t key_str(object_key_.c_str(), alloc_inst);
-            file_to_shared_data_map_t *shared_data_map = segment.find_or_construct<file_to_shared_data_map_t>
-                ("FileToSharedDataMap")(alloc_inst);
-            auto entry = shared_data_map->find(key_str);
-
+            multipart_shared_data_t *shared_data = segment.find_or_construct<multipart_shared_data_t>
+                ("SharedData")(alloc_inst);
             // Allocate all dynamic storage now, so we don't start a job we can't finish later
             //manager.etags = (char**)calloc(sizeof(char*) * totalParts, 1);
             try {
-                entry->second.etags.resize(total_parts_, shm_char_string_t("", alloc_inst));
+                shared_data->etags.resize(total_parts_, shm_char_string_t("", alloc_inst));
             } catch (std::bad_alloc& ba) {
                 return SYS_MALLOC_ERR;   // not really malloc but close enough
             }
@@ -1015,14 +1186,14 @@ namespace irods::experimental::io
                     && S3_status_is_retryable(upload_manager_.status)
                     && ( ++retry_cnt < retry_count_limit_));
 
-            if ("" == entry->second.upload_id || upload_manager_.status != S3StatusOK) {
+            if ("" == shared_data->upload_id || upload_manager_.status != S3StatusOK) {
                 return S3_PUT_ERROR;
             }
 
             if (debug_flag_) {
                 printf("%s:%d (%s) [part=%d] S3_initiate_multipart returned.  Upload ID = %s\n",
                         __FILE__, __LINE__, __FUNCTION__, sequence_, 
-                        entry->second.upload_id.c_str());
+                        shared_data->upload_id.c_str());
             }
             upload_manager_.remaining = 0;
             upload_manager_.offset  = 0;
@@ -1034,13 +1205,14 @@ namespace irods::experimental::io
         void mpuCancel()
         {
             // read upload_id from shmem
-            bi::managed_shared_memory segment(bi::open_or_create, "MySharedMemory", 65536);
+            std::string shared_memory_name =  object_key_ + "-shm";
+            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
+
             void_allocator alloc_inst(segment.get_segment_manager());
             shm_char_string_t key_str(object_key_.c_str(), alloc_inst);
-            file_to_shared_data_map_t *shared_data_map = segment.find_or_construct<file_to_shared_data_map_t>
-                ("FileToSharedDataMap")(alloc_inst);
-            auto entry = shared_data_map->find(key_str);
-            std::string upload_id = entry->second.upload_id.c_str();
+            multipart_shared_data_t *shared_data = segment.find_or_construct<multipart_shared_data_t>
+                ("SharedData")(alloc_inst);
+            std::string upload_id = shared_data->upload_id.c_str();
 
             S3AbortMultipartUploadHandler abortHandler 
                 = { { mpuCancelRespPropCB, mpuCancelRespCompCB } };
@@ -1082,15 +1254,16 @@ namespace irods::experimental::io
             std::stringstream xml("");
 
             // read upload_id from shmem
-            bi::managed_shared_memory segment(bi::open_or_create, "MySharedMemory", 65536);
+            std::string shared_memory_name =  object_key_ + "-shm";
+            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
+
             void_allocator alloc_inst(segment.get_segment_manager());
             shm_char_string_t key_str(object_key_.c_str(), alloc_inst);
-            file_to_shared_data_map_t *shared_data_map = segment.find_or_construct<file_to_shared_data_map_t>
-                ("FileToSharedDataMap")(alloc_inst);
-            auto entry = shared_data_map->find(key_str);
-            std::string upload_id = entry->second.upload_id.c_str();
+            multipart_shared_data_t *shared_data = segment.find_or_construct<multipart_shared_data_t>
+                ("SharedData")(alloc_inst);
+            std::string upload_id = shared_data->upload_id.c_str();
 
-            if (0 == entry->second.last_error) { // If someone aborted, don't complete...
+            if (0 == shared_data->last_error) { // If someone aborted, don't complete...
                 if (debug_flag_) {
                     msg.str( std::string() ); // Clear
                     msg << "Multipart:  Completing key \"" << object_key_.c_str() << "\"";
@@ -1105,7 +1278,7 @@ namespace irods::experimental::io
                     xml << "<Part><PartNumber>";
                     xml << (i + 1);
                     xml << "</PartNumber><ETag>";
-                    xml << entry->second.etags[i];
+                    xml << shared_data->etags[i];
                     xml << "</ETag></Part>";
                 }
                 xml << "</CompleteMultipartUpload>\n";
@@ -1144,30 +1317,121 @@ namespace irods::experimental::io
                     return S3_PUT_ERROR;
                 }
             }
-            if (0 > entry->second.last_error && "" != entry->second.upload_id ) {
+            if (0 > shared_data->last_error && "" != shared_data->upload_id ) {
 
                 // Someone aborted after we started, delete the partial object on S3
                 printf("Cancelling multipart upload\n");
                 mpuCancel();
 
                 // Return the error
-                result = entry->second.last_error;
+                result = shared_data->last_error;
             }
 
             return result;
         } // end complete_multipart_upload
 
         // this function is called in the background in a separate thread
-        void call_s3_upload_part() {
-
+        /*void s3_download_part_worker_routine() 
+        {
             // read upload_id from shmem
-            bi::managed_shared_memory segment(bi::open_or_create, "MySharedMemory", 65536);
+            std::string shared_memory_name =  object_key_ + "-shm";
+            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
+
             void_allocator alloc_inst(segment.get_segment_manager());
             shm_char_string_t key_str(object_key_.c_str(), alloc_inst);
-            file_to_shared_data_map_t *shared_data_map = segment.find_or_construct<file_to_shared_data_map_t>
-                ("FileToSharedDataMap")(alloc_inst);
-            auto entry = shared_data_map->find(key_str);
-            std::string upload_id = entry->second.upload_id.c_str();
+            multipart_shared_data_t *shared_data = segment.find_or_construct<multipart_shared_data_t>
+                ("SharedData")(alloc_inst);
+            std::string download_id = shared_data->download_id.c_str();
+
+
+            S3BucketContext bucketContext = *((S3BucketContext*)bucketContextParam);
+            irods::plugin_property_map _prop_map = *((irods::plugin_property_map*)pluginPropertyMapParam);
+
+            std::string resource_name = get_resource_name(_prop_map);
+
+            irods::error result;
+            std::stringstream msg;
+            S3GetObjectHandler getObjectHandler = { {mrdRangeRespPropCB, mrdRangeRespCompCB }, mrdRangeGetDataCB };
+
+            size_t retry_count_limit = S3_DEFAULT_RETRY_COUNT;
+            _prop_map.get<size_t>(s3_retry_count_size_t, retry_count_limit);
+
+            size_t retry_wait = S3_DEFAULT_RETRY_WAIT_SEC;
+            _prop_map.get<size_t>(s3_wait_time_sec_size_t, retry_wait);
+
+            // Will break out when no work detected 
+            while (1) {
+                // Pointer is probably safe w/o mutex, but JIK...
+                g_mrdLock.lock();
+                bool ok = (g_mrdResult.ok());
+                g_mrdLock.unlock();
+                if (!ok) break;
+
+                int seq;
+                g_mrdLock.lock();
+                if (g_mrdNext >= g_mrdLast) {
+                    g_mrdLock.unlock();
+                    break;
+                }
+                seq = g_mrdNext + 1;
+                g_mrdNext++;
+                g_mrdLock.unlock();
+
+                size_t retry_cnt = 0;
+                multirange_data_t rangeData;
+                do {
+                    // Work on a local copy of the structure in case an error occurs in the middle
+                    // of an upload.  If we updated in-place, on a retry the part would start
+                    // at the wrong offset and length.
+                    rangeData = g_mrdData[seq-1];
+                    rangeData.pCtx = &bucketContext;
+                    rangeData.prop_map_ptr = &_prop_map;
+
+                    msg.str( std::string() ); // Clear
+                    msg << "Multirange:  Start range " << (int)seq << ", key \"" << g_mrdKey << "\", offset "
+                        << (long)rangeData.get_object_data.offset << ", len " << (int)rangeData.get_object_data.contentLength;
+                    rodsLog( LOG_DEBUG, msg.str().c_str() );
+
+                    unsigned long long usStart = usNow();
+                    std::string&& hostname = s3GetHostname(_prop_map);
+                    bucketContext.hostName = hostname.c_str(); // Safe to do, this is a local copy of the data structure
+                    S3_get_object( &bucketContext, g_mrdKey, NULL, rangeData.get_object_data.offset,
+                                   rangeData.get_object_data.contentLength, 0, &getObjectHandler, &rangeData );
+                    unsigned long long usEnd = usNow();
+                    double bw = (g_mrdData[seq-1].get_object_data.contentLength / (1024.0*1024.0)) / ( (usEnd - usStart) / 1000000.0 );
+                    msg << " -- END -- BW=" << bw << " MB/s";
+                    rodsLog( LOG_DEBUG, msg.str().c_str() );
+                    if (rangeData.status != S3StatusOK) s3_sleep( retry_wait, 0 );
+                } while ((rangeData.status != S3StatusOK) && S3_status_is_retryable(rangeData.status) && (++retry_cnt < retry_count_limit));
+                if (rangeData.status != S3StatusOK) {
+                    msg.str( std::string() ); // Clear
+                    msg << "[resource_name=" << resource_name << "] " << __FUNCTION__ 
+                        << " - Error getting the S3 object: \"" << g_mrdKey << "\" range " << seq;
+                    if (rangeData.status >= 0) {
+                        msg << " - \"" << S3_get_status_name( rangeData.status ) << "\"";
+                    }
+                    result = ERROR( S3_GET_ERROR, msg.str() );
+                    rodsLog( LOG_ERROR, msg.str().c_str() );
+                    g_mrdLock.lock();
+                    g_mrdResult = result;
+                    g_mrdLock.unlock();
+                }
+            }
+
+        } // end call_s3_download_part*/
+
+        // this function is called in the background in a separate thread
+        void s3_upload_part_worker_routine() {
+
+            // read upload_id from shmem
+            std::string shared_memory_name =  object_key_ + "-shm";
+            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
+
+            void_allocator alloc_inst(segment.get_segment_manager());
+            shm_char_string_t key_str(object_key_.c_str(), alloc_inst);
+            multipart_shared_data_t *shared_data = segment.find_or_construct<multipart_shared_data_t>
+                ("SharedData")(alloc_inst);
+            std::string upload_id = shared_data->upload_id.c_str();
 
             std::stringstream msg;
             S3PutObjectHandler putObjectHandler 
@@ -1255,7 +1519,7 @@ namespace irods::experimental::io
                     (++retry_cnt < retry_count_limit_));
 
             if (partData.status != S3StatusOK) {
-                entry->second.last_error = S3_PUT_ERROR;
+                shared_data->last_error = S3_PUT_ERROR;
             }
         }
 
@@ -1279,11 +1543,16 @@ namespace irods::experimental::io
         bool                      debug_flag_;
         multipart_data_t          mpu_data_;
         bool                      call_s3_upload_part_flag_;
+        bool                      call_s3_download_part_flag_;
         S3PutProperties           put_props_;
 
         irods::experimental::circular_buffer<upload_page_t>
                                   circular_buffer_;
         std::thread               *begin_part_upload_thread_ptr_;
+        std::thread               *begin_part_download_thread_ptr_;
+
+        std::ios_base::openmode   mode_;
+        bool                      multipart_flag_;
     
         // TODO do i need a file descriptor?
         inline static int file_descriptor_counter_ = minimum_valid_file_descriptor;

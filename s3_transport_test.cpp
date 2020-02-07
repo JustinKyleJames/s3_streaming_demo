@@ -34,14 +34,14 @@ int main(int argc, char **argv)
     }
 
     // Remove shared memory on construction and destruction
-    struct shm_remove
-    {
-       shm_remove() { bi::shared_memory_object::remove("MySharedMemory"); }
-       ~shm_remove(){ bi::shared_memory_object::remove("MySharedMemory"); }
-    } remover;
+    //struct shm_remove
+    //{
+    //   shm_remove() { bi::shared_memory_object::remove("MySharedMemory"); }
+    //   ~shm_remove(){ bi::shared_memory_object::remove("MySharedMemory"); }
+    //} remover;
 
     //Create shared memory
-    bi::managed_shared_memory segment(bi::create_only,"MySharedMemory", 65536);
+    //bi::managed_shared_memory segment(bi::create_only,"MySharedMemory", 65536);
 
     std::string config_file = argv[1];
     std::string filename = argv[2];
@@ -226,7 +226,7 @@ void doit(int thread_number,
      *****************************************/
 
     s3_transport tp1{seq, current_buffer_size, thread_count, file_size, 1, 1, hostname, bucket_name, access_key, 
-        secret_access_key, "V4", "http", "amz", true};
+        secret_access_key, true, "V4", "http", "amz", true};
 
     odstream ds1{tp1, filename};
     ds1.write(current_buffer, current_buffer_size);
