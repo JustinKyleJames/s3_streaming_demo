@@ -111,7 +111,8 @@ namespace irods::experimental::io
             , upload_id(allocator)
             , download_id(allocator)
             , etags(allocator)
-            , last_error(0)  
+            , last_error(0)
+            , cache_file_downloaded_flag{false}
         {} 
     
         int                      file_open_cntr;
@@ -119,6 +120,7 @@ namespace irods::experimental::io
         shm_char_string_t        download_id;
         shm_string_vector_t      etags;
         int                      last_error;
+        bool                     cache_file_downloaded_flag;
     };
     
      
@@ -153,18 +155,6 @@ namespace irods::experimental::io
        bool   terminate_flag;
     };
 
-    const size_t S3_DEFAULT_RETRY_WAIT_SEC = 1;
-    const size_t S3_DEFAULT_RETRY_COUNT = 1;
-
-    // Returns timestamp in usec for delta-t comparisons
-    static unsigned long long usNow() 
-    {
-        struct timeval tv;
-        gettimeofday(&tv, nullptr);
-        unsigned long long us = (tv.tv_sec) * 1000000LL + tv.tv_usec;
-        return us;
-    } // end usNow
-
     typedef struct s3Stat
     {
         char       key[MAX_NAME_LEN];
@@ -188,6 +178,40 @@ namespace irods::experimental::io
         S3BucketContext   *pCtx;                /* To enable more detailed error messages */
         bool              debug_flag;
     } callback_data_t;
+
+    // callback data when reading/writing to cache file
+    typedef struct cache_callback_data
+    {
+        int fd;
+        long offset;       /* For multiple upload */
+        rodsLong_t contentLength, originalContentLength;
+        S3Status status;
+        int keyCount;
+        s3Stat_t s3Stat;    /* should be a pointer if keyCount > 1 */
+    
+        S3BucketContext *pCtx; /* To enable more detailed error messages */
+    } cache_callback_data_t;    
+
+    typedef struct multirange_data
+    {
+        int                   seq;
+        cache_callback_data_t get_object_data;
+        S3Status              status;
+        S3BucketContext       *pCtx; // To enable more detailed error messages 
+    } multirange_data_t;
+
+    const size_t S3_DEFAULT_RETRY_WAIT_SEC = 1;
+    const size_t S3_DEFAULT_RETRY_COUNT = 1;
+
+    // Returns timestamp in usec for delta-t comparisons
+    static unsigned long long usNow() 
+    {
+        struct timeval tv;
+        gettimeofday(&tv, nullptr);
+        unsigned long long us = (tv.tv_sec) * 1000000LL + tv.tv_usec;
+        return us;
+    } // end usNow
+
 
     typedef struct upload_manager
     {
@@ -330,38 +354,47 @@ namespace irods::experimental::io
         // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
     } // end mpuCommitRespCompCB
 
-    /*static S3Status getObjectDataCallback(int bufferSize, 
+    static S3Status getObjectDataCallback(int bufferSize, 
                                           const char *buffer, 
                                           void *callbackData)
     {
-        callback_data_t *cb = (callback_data_t *)callbackData;
-        irods::plugin_property_map *prop_map_ptr = cb ? cb->prop_map_ptr : nullptr;
-        std::string resource_name = prop_map_ptr != nullptr ? get_resource_name(*prop_map_ptr) : "";
-    
-        irods::error result = ASSERT_ERROR(bufferSize != 0 && buffer != NULL && callbackData != NULL,
-                                           SYS_INVALID_INPUT_PARAM, "[resource_name=%s] Invalid input parameter.", resource_name.c_str() );
-        if(!result.ok()) {
-            irods::log(result);
-        }
+        cache_callback_data_t *cb = (cache_callback_data_t *)callbackData;
     
         ssize_t wrote = pwrite(cb->fd, buffer, bufferSize, cb->offset);
         if (wrote>0) cb->offset += wrote;
     
-    #ifdef ERROR_INJECT
-        g_error_mutex.lock();
-        g_werr++;
-        if (g_werr == g_werr_idx) {
-            rodsLog(LOG_ERROR, "[resource_name=%s] Injecting a PWRITE error during S3 callback", resource_name.c_str() );
-            g_error_mutex.unlock();
-            return S3StatusAbortedByCallback;
-        }
-        g_error_mutex.unlock();
-    #endif
-    
         return ((wrote < (ssize_t) bufferSize) ?
                 S3StatusAbortedByCallback : S3StatusOK);
-    }*/
+    }
 
+
+    static S3Status mrdRangeGetDataCB (
+        int bufferSize,
+        const char *buffer,
+        void *callbackData)
+    {
+        multirange_data_t *data = (multirange_data_t*)callbackData;
+        return getObjectDataCallback( bufferSize, buffer, &(data->get_object_data) );
+    }
+
+    static S3Status mrdRangeRespPropCB (
+        const S3ResponseProperties *properties,
+        void *callbackData)
+    {
+        // Don't need to do anything here
+        return S3StatusOK;
+    }
+
+    static void mrdRangeRespCompCB (
+        S3Status status,
+        const S3ErrorDetails *error,
+        void *callbackData)
+    {
+        multirange_data_t *data = (multirange_data_t*)callbackData;
+        StoreAndLogStatus( status, error, __FUNCTION__, data->pCtx, &(data->status) );
+        // Don't change the global error, we may want to retry at a higher level.
+        // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
+    }
 
     static int putObjectDataCallback(int libs3_buffer_size, 
                                      char *libs3_buffer, 
@@ -530,7 +563,6 @@ namespace irods::experimental::io
         usleep( us );
     } // end s3_sleep
 
-
     template <typename CharT>
     class s3_transport : public transport<CharT>
     {
@@ -586,6 +618,7 @@ namespace irods::experimental::io
             , access_key_{_access_key}
             , secret_access_key_{_secret_access_key}
             , multipart_flag_{_multipart_flag}
+            , cache_fd_{0}
             , debug_flag_{_debug_flag}
             , fd_{uninitialized_file_descriptor}
             , fd_info_{}
@@ -594,7 +627,10 @@ namespace irods::experimental::io
             , begin_part_upload_thread_ptr_{nullptr}
             , begin_part_download_thread_ptr_{nullptr}
             , circular_buffer_{1}
-            , mode_(0)
+            , mode_{0}
+            , download_to_cache_{false}
+            , use_cache_{false}
+            , object_must_exist_{false}
         {
 
 
@@ -655,6 +691,11 @@ namespace irods::experimental::io
             }
 
             if (put_props_.md5) free( (char*)put_props_.md5 );
+        }
+
+        bool object_exists_in_s3() {
+            // TODO 
+            return false;
         }
 
 
@@ -957,30 +998,48 @@ namespace irods::experimental::io
 
     private:
 
-        int make_open_flags(std::ios_base::openmode _mode) noexcept
+        int populate_open_mode_flags() noexcept
         {
             using std::ios_base;
 
-            const auto m = _mode & ~(ios_base::ate | ios_base::binary);
+            const auto m = mode_ & ~(ios_base::ate | ios_base::binary);
 
             if (ios_base::in == m) {
+                download_to_cache_ = false;
+                use_cache_ = false;
+                object_must_exist_ = true;
                 return O_RDONLY;
             }
             else if (ios_base::out == m || (ios_base::out | ios_base::trunc) == m) {
+                download_to_cache_ = false;
+                use_cache_ = false;
+                object_must_exist_ = false;
                 return O_CREAT | O_WRONLY | O_TRUNC;
             }
             else if (ios_base::app == m || (ios_base::out | ios_base::app) == m) {
+                download_to_cache_ = true;
+                use_cache_ = true;
+                object_must_exist_ = false;
                 return O_CREAT | O_WRONLY | O_APPEND;
             }
             else if ((ios_base::out | ios_base::in) == m) {
-                return O_CREAT | O_RDWR;
+                download_to_cache_ = true;
+                use_cache_ = true;
+                object_must_exist_ = true;
+                return O_RDWR;
             }
             else if ((ios_base::out | ios_base::in | ios_base::trunc) == m) {
+                download_to_cache_ = false;
+                use_cache_ = true;
+                object_must_exist_ = false;
                 return O_CREAT | O_RDWR | O_TRUNC;
             }
             else if ((ios_base::out | ios_base::in | ios_base::app) == m ||
                      (ios_base::in | ios_base::app) == m)
             {
+                download_to_cache_ = true;
+                use_cache_ = true;
+                object_must_exist_ = false;
                 return O_CREAT | O_RDWR | O_APPEND | O_TRUNC;
             }
 
@@ -1003,66 +1062,104 @@ namespace irods::experimental::io
                        std::ios_base::openmode _mode, 
                        Function _func)
         {
+
+printf("%s:%d (%s) [_mode & in = %d][_mode & out = %d][_mode & trunc = %d][_mode & app = %d]\n",
+    __FILE__, __LINE__, __FUNCTION__,
+    (_mode & std::ios_base::in) != 0, 
+    (_mode & std::ios_base::out) != 0, 
+    (_mode & std::ios_base::trunc) != 0, 
+    (_mode & std::ios_base::app) != 0);
+
             object_key_ = _p.string();
             upload_manager_.object_key = object_key_;
 
             mode_ = _mode;
 
-            if (multipart_flag_) {
+            bool object_exists = object_exists_in_s3();
+            int open_flags = populate_open_mode_flags();
+            if (open_flags == translation_error) {
+                printf("%s:%d (%s) Invalid open mode detected.\n", __FILE__, __LINE__, __FUNCTION__);
+                return false;
+            }
+
+printf("%s:%d (%s) [multipart_flag_ = %d][use_cache_ = %d][open_flags & O_WRONLY = %d]\n",
+    __FILE__, __LINE__, __FUNCTION__,
+    multipart_flag_,
+    use_cache_,
+    (open_flags & O_WRONLY) != 0);
+
+            if (object_must_exist_ && !object_exists) {
+                printf("%s:%d (%s) Object does not exist and open mode requires it to exist.\n", 
+                        __FILE__, __LINE__, __FUNCTION__);
+                return false;
+            }
+
+            // go ahead and read the shared data 
                 
-                std::string shared_memory_name =  object_key_ + "-shm";
-                bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
+            std::string shared_memory_name =  object_key_ + "-shm";
+            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
 
-                void_allocator alloc_inst(segment.get_segment_manager());
-                shm_char_string_t key_str(object_key_.c_str(), alloc_inst);
+            void_allocator alloc_inst(segment.get_segment_manager());
+            shm_char_string_t key_str(object_key_.c_str(), alloc_inst);
 
-                multipart_shared_data_t *shared_data = segment.find_or_construct <multipart_shared_data_t> 
-                    ("SharedData")(alloc_inst);
+            multipart_shared_data_t *shared_data = segment.find_or_construct <multipart_shared_data_t> 
+                ("SharedData")(alloc_inst);
 
-                // first one end calls initiate, all else waits
-                std::string mtx_name = object_key_ + "-mtx";
-                //bi::named_mutex named_mtx{bi::open_or_create, mtx_name.c_str()};
-                //bi::scoped_lock<bi::named_mutex> lock{named_mtx};
+            ++(shared_data->file_open_cntr);
+
+            // first one in calls initiate, all else waits
+            std::string mtx_name = object_key_ + "-mtx";
+           
+            std::string cache_file =  "/tmp" + object_key_ + "-cache";
+
+            if (object_exists && download_to_cache_) {
+
+                std::string cache_file =  "/tmp" + object_key_ + "-cache";
+
+                // go ahead and lock while reading cache file
                 scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__);
 
-                if (mode_ & std::ios_base::out)
-                {
-                    if (debug_flag_) {
-                        printf("%s:%d (%s) [multipart_flag=true]\n", __FILE__, __LINE__, 
-                                __FUNCTION__);
+                if (!shared_data->cache_file_downloaded_flag) {
+
+                    // go ahead and download the object to cache file
+                    cache_fd_ = open(cache_file.c_str(), O_RDONLY);
+
+                    unsigned long long usStart = usNow(); std::list<std::thread*> threads;
+                    for (int thr_id=0; thr_id < total_parts_; thr_id++) {
+                        std::thread *thisThread = new std::thread(&s3_transport::s3_download_part_worker_routine, this, thr_id+1);
+                        threads.push_back(thisThread);
                     }
 
-                    ++(shared_data->file_open_cntr);
-
-                    if (debug_flag_) {
-                        printf("%s:%d (%s) [file_open_cntr=%d]\n", __FILE__, __LINE__, __FUNCTION__,
-                                shared_data->file_open_cntr);
+                    // Wait for threads to finish 
+                    while (!threads.empty()) {
+                        std::thread *thisThread = threads.front();
+                        thisThread->join();
+                        delete thisThread;
+                        threads.pop_front();
                     }
-
-                    // first one in initiates the multipart
-                    if (shared_data->last_error >= 0 && shared_data->file_open_cntr == 1) {
-
-                        // send initiate message to S3
-                        int ret = initiate_multipart_upload();
-
-                        if (ret < 0) {
-                            shared_data->last_error = ret;
-                            return ret;
-                        }
-                    } else {
-                        if (shared_data->last_error < 0) {
-                            return shared_data->last_error;
-                        }
-                    }
-                } else if (mode_ & std::ios_base::in) {
-
+                    shared_data->cache_file_downloaded_flag = true;
                 }
             }
 
-            const auto flags = make_open_flags(_mode);
+            if (multipart_flag_ && !use_cache_ && (open_flags & O_WRONLY) ) {
 
-            if (flags == translation_error) {
-                return false;
+                // this is a full file upload, start multipart
+                
+                // first one in initiates the multipart
+                if (shared_data->last_error >= 0 && shared_data->file_open_cntr == 1) {
+
+                    // send initiate message to S3
+                    int ret = initiate_multipart_upload();
+
+                    if (ret < 0) {
+                        shared_data->last_error = ret;
+                        return false;
+                    }
+                } else {
+                    if (shared_data->last_error < 0) {
+                        return false;
+                    }
+                }
             }
 
 
@@ -1331,7 +1428,7 @@ namespace irods::experimental::io
         } // end complete_multipart_upload
 
         // this function is called in the background in a separate thread
-        /*void s3_download_part_worker_routine() 
+        void s3_download_part_worker_routine(int seq) 
         {
             // read upload_id from shmem
             std::string shared_memory_name =  object_key_ + "-shm";
@@ -1343,82 +1440,57 @@ namespace irods::experimental::io
                 ("SharedData")(alloc_inst);
             std::string download_id = shared_data->download_id.c_str();
 
-
-            S3BucketContext bucketContext = *((S3BucketContext*)bucketContextParam);
-            irods::plugin_property_map _prop_map = *((irods::plugin_property_map*)pluginPropertyMapParam);
-
-            std::string resource_name = get_resource_name(_prop_map);
-
-            irods::error result;
             std::stringstream msg;
             S3GetObjectHandler getObjectHandler = { {mrdRangeRespPropCB, mrdRangeRespCompCB }, mrdRangeGetDataCB };
 
-            size_t retry_count_limit = S3_DEFAULT_RETRY_COUNT;
-            _prop_map.get<size_t>(s3_retry_count_size_t, retry_count_limit);
-
-            size_t retry_wait = S3_DEFAULT_RETRY_WAIT_SEC;
-            _prop_map.get<size_t>(s3_wait_time_sec_size_t, retry_wait);
-
             // Will break out when no work detected 
             while (1) {
-                // Pointer is probably safe w/o mutex, but JIK...
-                g_mrdLock.lock();
-                bool ok = (g_mrdResult.ok());
-                g_mrdLock.unlock();
-                if (!ok) break;
-
-                int seq;
-                g_mrdLock.lock();
-                if (g_mrdNext >= g_mrdLast) {
-                    g_mrdLock.unlock();
-                    break;
-                }
-                seq = g_mrdNext + 1;
-                g_mrdNext++;
-                g_mrdLock.unlock();
 
                 size_t retry_cnt = 0;
                 multirange_data_t rangeData;
                 do {
-                    // Work on a local copy of the structure in case an error occurs in the middle
-                    // of an upload.  If we updated in-place, on a retry the part would start
-                    // at the wrong offset and length.
-                    rangeData = g_mrdData[seq-1];
-                    rangeData.pCtx = &bucketContext;
-                    rangeData.prop_map_ptr = &_prop_map;
+                    rangeData.pCtx = &bucket_context_;
+                    rangeData.seq = seq;
+
+                    if (seq == total_parts_ - 1) {
+                        // last part gets extra bytes
+                        rangeData.get_object_data.contentLength = part_size_ + (object_size_ - part_size_ * total_parts_);
+                    } else {
+                        rangeData.get_object_data.contentLength = part_size_;
+                    }
+                    rangeData.get_object_data.offset = part_size_ * seq;
+                    rangeData.get_object_data.fd = cache_fd_;
 
                     msg.str( std::string() ); // Clear
-                    msg << "Multirange:  Start range " << (int)seq << ", key \"" << g_mrdKey << "\", offset "
+                    msg << "Multirange:  Start range " << (int)(seq - 1) << ", key \"" << object_key_ << "\", offset "
                         << (long)rangeData.get_object_data.offset << ", len " << (int)rangeData.get_object_data.contentLength;
                     rodsLog( LOG_DEBUG, msg.str().c_str() );
 
                     unsigned long long usStart = usNow();
-                    std::string&& hostname = s3GetHostname(_prop_map);
-                    bucketContext.hostName = hostname.c_str(); // Safe to do, this is a local copy of the data structure
-                    S3_get_object( &bucketContext, g_mrdKey, NULL, rangeData.get_object_data.offset,
-                                   rangeData.get_object_data.contentLength, 0, &getObjectHandler, &rangeData );
+                    S3_get_object( &bucket_context_, object_key_.c_str(), NULL, rangeData.get_object_data.offset,
+                            rangeData.get_object_data.contentLength, 0, &getObjectHandler, &rangeData );
+
                     unsigned long long usEnd = usNow();
-                    double bw = (g_mrdData[seq-1].get_object_data.contentLength / (1024.0*1024.0)) / ( (usEnd - usStart) / 1000000.0 );
+                    double bw = (rangeData.get_object_data.contentLength / (1024.0*1024.0)) / ( (usEnd - usStart) / 1000000.0 );
                     msg << " -- END -- BW=" << bw << " MB/s";
                     rodsLog( LOG_DEBUG, msg.str().c_str() );
-                    if (rangeData.status != S3StatusOK) s3_sleep( retry_wait, 0 );
-                } while ((rangeData.status != S3StatusOK) && S3_status_is_retryable(rangeData.status) && (++retry_cnt < retry_count_limit));
+                    if (rangeData.status != S3StatusOK) s3_sleep( retry_wait_, 0 );
+                } while ((rangeData.status != S3StatusOK) && S3_status_is_retryable(rangeData.status) && (++retry_cnt < retry_count_limit_));
                 if (rangeData.status != S3StatusOK) {
                     msg.str( std::string() ); // Clear
-                    msg << "[resource_name=" << resource_name << "] " << __FUNCTION__ 
-                        << " - Error getting the S3 object: \"" << g_mrdKey << "\" range " << seq;
+                    msg << "[resource_name=" << resource_name() << "] " << __FUNCTION__ 
+                        << " - Error getting the S3 object: \"" << object_key_ << "\" range " << seq;
                     if (rangeData.status >= 0) {
                         msg << " - \"" << S3_get_status_name( rangeData.status ) << "\"";
                     }
-                    result = ERROR( S3_GET_ERROR, msg.str() );
-                    rodsLog( LOG_ERROR, msg.str().c_str() );
-                    g_mrdLock.lock();
-                    g_mrdResult = result;
-                    g_mrdLock.unlock();
+                }
+
+                if (rangeData.status != S3StatusOK) {
+                    shared_data->last_error = S3_GET_ERROR;
                 }
             }
 
-        } // end call_s3_download_part*/
+        } // end s3_download_part_worker_routine
 
         // this function is called in the background in a separate thread
         void s3_upload_part_worker_routine() {
@@ -1553,7 +1625,13 @@ namespace irods::experimental::io
 
         std::ios_base::openmode   mode_;
         bool                      multipart_flag_;
-    
+        int                       cache_fd_;
+   
+        // operational modes based on input flags  
+        bool                      download_to_cache_;
+        bool                      use_cache_;
+        bool                      object_must_exist_;
+
         // TODO do i need a file descriptor?
         inline static int file_descriptor_counter_ = minimum_valid_file_descriptor;
 
