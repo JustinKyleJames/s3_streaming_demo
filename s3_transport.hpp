@@ -294,7 +294,6 @@ namespace irods::experimental::io
         shm_char_string_t key_str(object_key.c_str(), alloc_inst);
 
         // no need to lock as this should already be locked
-
         multipart_shared_data_t *shared_data = segment.find_or_construct<multipart_shared_data_t>
                 ("SharedData")(alloc_inst);
         shared_data->upload_id = upload_id;
@@ -628,6 +627,7 @@ namespace irods::experimental::io
             , begin_part_download_thread_ptr_{nullptr}
             , circular_buffer_{1}
             , mode_{0}
+            , file_offset_{0}
             , download_to_cache_{false}
             , use_cache_{false}
             , object_must_exist_{false}
@@ -741,73 +741,82 @@ namespace irods::experimental::io
                 return false;
             }
 
-            if (multipart_flag_ && (mode_ & std::ios_base::out)) {
+            int open_flags = populate_open_mode_flags();
 
-                std::string shared_memory_name =  object_key_ + "-shm";
-                bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
+            if ( open_flags == (O_CREAT | O_WRONLY | O_TRUNC) ) {
 
-                void_allocator alloc_inst(segment.get_segment_manager());
-                shm_char_string_t key_str(object_key_.c_str(), alloc_inst);
-                multipart_shared_data_t *shared_data = segment.find_or_construct<multipart_shared_data_t>
-                    ("SharedData")(alloc_inst);
+                if (multipart_flag_) {
 
-                if (debug_flag_) {
-                    printf("%s:%d (%s) [multipart_flag=true]\n", 
-                            __FILE__, __LINE__, __FUNCTION__);
-                }
+                    // This was a full multipart upload w/o cache.
 
-                // upload was in background.  wait for it to complete.
-                if (begin_part_upload_thread_ptr_) {
-                    begin_part_upload_thread_ptr_->join();
-                    begin_part_upload_thread_ptr_ = nullptr;
-                }
+                    std::string shared_memory_name =  object_key_ + "-shm";
+                    bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
 
-                if (debug_flag_) {
-                    printf("%s:%d (%s) join for part %d\n", 
-                            __FILE__, __LINE__, __FUNCTION__, sequence_);
-                }
-
-                fd_ = uninitialized_file_descriptor;
-
-                {
-                    // lock for update
-                    std::string mtx_name = object_key_ + "-mtx";
-                    //bi::named_mutex named_mtx{bi::open_or_create, mtx_name.c_str()};
-                    //bi::scoped_lock<bi::named_mutex> lock{named_mtx};
-                    scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__);
-
-                    // read number of opens for this key 
-                    int open_count = --(shared_data->file_open_cntr);
+                    void_allocator alloc_inst(segment.get_segment_manager());
+                    shm_char_string_t key_str(object_key_.c_str(), alloc_inst);
+                    multipart_shared_data_t *shared_data = segment.find_or_construct<multipart_shared_data_t>
+                        ("SharedData")(alloc_inst);
 
                     if (debug_flag_) {
-                        printf("%s:%d (%s) [file_open_cntr=%d]\n", 
-                                __FILE__, __LINE__, __FUNCTION__,
-                                open_count);
+                        printf("%s:%d (%s) [multipart_flag=true]\n", 
+                                __FILE__, __LINE__, __FUNCTION__);
                     }
 
-                    if (open_count == 0) {
+                    // upload was in background.  wait for it to complete.
+                    if (begin_part_upload_thread_ptr_) {
+                        begin_part_upload_thread_ptr_->join();
+                        begin_part_upload_thread_ptr_ = nullptr;
+                    }
 
-                        int ret = complete_multipart_upload();
+                    if (debug_flag_) {
+                        printf("%s:%d (%s) join for part %d\n", 
+                                __FILE__, __LINE__, __FUNCTION__, sequence_);
+                    }
 
-                        if (ret < 0) {
-                            return false;
+                    fd_ = uninitialized_file_descriptor;
+
+                    {
+                        // lock for update
+                        std::string mtx_name = object_key_ + "-mtx";
+                        //bi::named_mutex named_mtx{bi::open_or_create, mtx_name.c_str()};
+                        //bi::scoped_lock<bi::named_mutex> lock{named_mtx};
+                        scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__);
+
+                        // read number of opens for this key 
+                        int open_count = --(shared_data->file_open_cntr);
+
+                        if (debug_flag_) {
+                            printf("%s:%d (%s) [file_open_cntr=%d]\n", 
+                                    __FILE__, __LINE__, __FUNCTION__,
+                                    open_count);
                         }
 
+                        if (open_count == 0) {
 
-                        bool remove_flag= bi::shared_memory_object::remove(shared_memory_name.c_str());
-                        if (!remove_flag) {
-                            fprintf(stderr, "%s:%d (%s) Failed to remove shared memory %s\n", 
-                                    __FILE__, __LINE__, __FUNCTION__, shared_memory_name.c_str());
-                        }
+                            int ret = complete_multipart_upload();
 
-                        remove_flag = bi::named_mutex::remove(mtx_name.c_str());
-                        if (!remove_flag) {
-                            fprintf(stderr, "%s:%d (%s) Failed to remove shared mutex %s\n", 
-                                    __FILE__, __LINE__, __FUNCTION__, mtx_name.c_str());
+                            if (ret < 0) {
+                                return false;
+                            }
+
+
+                            bool remove_flag= bi::shared_memory_object::remove(shared_memory_name.c_str());
+                            if (!remove_flag) {
+                                fprintf(stderr, "%s:%d (%s) Failed to remove shared memory %s\n", 
+                                        __FILE__, __LINE__, __FUNCTION__, shared_memory_name.c_str());
+                            }
+
+                            remove_flag = bi::named_mutex::remove(mtx_name.c_str());
+                            if (!remove_flag) {
+                                fprintf(stderr, "%s:%d (%s) Failed to remove shared mutex %s\n", 
+                                        __FILE__, __LINE__, __FUNCTION__, mtx_name.c_str());
+                            }
                         }
                     }
+                } else {
+                    // TODO non-multipart upload finish
                 }
-            } else if (multipart_flag_ && (mode_ & std::ios_base::in)) {
+            } else if ( open_flags == O_RDONLY ) {
 
                 /*if (debug_flag_) {
                     printf("%s:%d (%s) [multipart_flag=true]\n", 
@@ -873,6 +882,10 @@ namespace irods::experimental::io
         std::streamsize receive(char_type* _buffer, 
                                 std::streamsize _buffer_size) override
         {
+            // just get what is asked for 
+            void s3_download_part_worker_routine(seq);
+
+
             // TODO right now this assumes a full file get before filling the buffer
             /*openedDataObjInp_t input{};
 
@@ -942,29 +955,46 @@ namespace irods::experimental::io
                 return seek_error;
             }
 
-            openedDataObjInp_t input{};
+            if (use_cache_) {
 
-            input.l1descInx = fd_;
-            input.offset = _offset;
+                // we are using a cache file so just seek on it
 
-            switch (_dir) {
-                case std::ios_base::beg:
-                    input.whence = SEEK_SET;
-                    break;
+                int return_val;
+                switch (_dir) {
+                    case std::ios_base::beg:
+                        return lseek(fd_, _offset, SEEK_SET);
 
-                case std::ios_base::cur:
-                    input.whence = SEEK_CUR;
-                    break;
+                    case std::ios_base::cur:
+                        return lseek(fd_, _offset, SEEK_CUR);
 
-                case std::ios_base::end:
-                    input.whence = SEEK_END;
-                    break;
+                    case std::ios_base::end:
+                        return lseek(fd_, _offset, SEEK_END);
 
-                default:
-                    return seek_error;
+                    default:
+                        return seek_error;
+                }
+
+            } else {
+
+                switch (_dir) {
+                    case std::ios_base::beg:
+                        file_offset_ = _offset;
+                        break;
+
+                    case std::ios_base::cur:
+                        file_offset_ = file_offset_ + _offset;
+                        break;
+
+                    case std::ios_base::end:
+                        file_offset_ = object_size_ + _offset;
+                        break;
+
+                    default:
+                        return seek_error;
+                }
+                return file_offset_;
             }
 
-            return 0;
         }
 
         bool is_open() const noexcept override
@@ -1141,27 +1171,42 @@ printf("%s:%d (%s) [multipart_flag_ = %d][use_cache_ = %d][open_flags & O_WRONLY
                 }
             }
 
-            if (multipart_flag_ && !use_cache_ && (open_flags & O_WRONLY) ) {
+            if ( open_flags == (O_CREAT | O_WRONLY | O_TRUNC) ) {
 
-                // this is a full file upload, start multipart
+printf("%s:%d (%s)\n", __FILE__, __LINE__, __FUNCTION__);
+
+                // this is a full file upload - do not use cache
                 
-                // first one in initiates the multipart
-                if (shared_data->last_error >= 0 && shared_data->file_open_cntr == 1) {
+                if (multipart_flag_) {
+                
+                    // first one in initiates the multipart
+                    if (shared_data->last_error >= 0 && shared_data->file_open_cntr == 1) {
 
-                    // send initiate message to S3
-                    int ret = initiate_multipart_upload();
+                        // send initiate message to S3
+                        int ret = initiate_multipart_upload();
 
-                    if (ret < 0) {
-                        shared_data->last_error = ret;
-                        return false;
+                        if (ret < 0) {
+                            printf("%s:%d (%s) open returning false [last_error=%d]\n", 
+                                    __FILE__, __LINE__, __FUNCTION__, ret);
+                            shared_data->last_error = ret;
+                            return false;
+                        }
+                    } else {
+                        if (shared_data->last_error < 0) {
+                            printf("%s:%d (%s) open returning false [last_error=%d]\n", 
+                                    __FILE__, __LINE__, __FUNCTION__, shared_data->last_error);
+                            return false;
+                        }
                     }
                 } else {
-                    if (shared_data->last_error < 0) {
-                        return false;
-                    }
+                    // TODO - non multipart upload
                 }
-            }
+            } else if (open_flags == O_RDONLY) {
 
+                // this is read only - do not use cached
+                // nothing to be done on open() in this case
+                
+            }
 
             const auto fd = file_descriptor_counter_++;
 
@@ -1428,8 +1473,9 @@ printf("%s:%d (%s) [multipart_flag_ = %d][use_cache_ = %d][open_flags & O_WRONLY
         } // end complete_multipart_upload
 
         // this function is called in the background in a separate thread
-        void s3_download_part_worker_routine(int seq) 
+        void s3_download_part_worker_routine(size_t length) 
         {
+
             // read upload_id from shmem
             std::string shared_memory_name =  object_key_ + "-shm";
             bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
@@ -1452,14 +1498,14 @@ printf("%s:%d (%s) [multipart_flag_ = %d][use_cache_ = %d][open_flags & O_WRONLY
                     rangeData.pCtx = &bucket_context_;
                     rangeData.seq = seq;
 
-                    if (seq == total_parts_ - 1) {
+                    /*if (seq == total_parts_ - 1) {
                         // last part gets extra bytes
                         rangeData.get_object_data.contentLength = part_size_ + (object_size_ - part_size_ * total_parts_);
                     } else {
                         rangeData.get_object_data.contentLength = part_size_;
                     }
                     rangeData.get_object_data.offset = part_size_ * seq;
-                    rangeData.get_object_data.fd = cache_fd_;
+                    rangeData.get_object_data.fd = cache_fd_;*/
 
                     msg.str( std::string() ); // Clear
                     msg << "Multirange:  Start range " << (int)(seq - 1) << ", key \"" << object_key_ << "\", offset "
@@ -1624,6 +1670,7 @@ printf("%s:%d (%s) [multipart_flag_ = %d][use_cache_ = %d][open_flags & O_WRONLY
         std::thread               *begin_part_download_thread_ptr_;
 
         std::ios_base::openmode   mode_;
+        size_t                    file_offset_;
         bool                      multipart_flag_;
         int                       cache_fd_;
    
