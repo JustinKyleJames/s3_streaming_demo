@@ -183,7 +183,8 @@ void doit(int thread_number,
           const char *bucket_name, 
           const char *access_key, 
           const char *secret_access_key, 
-          const char *filename) 
+          const char *filename,
+          bool read_flag = false) 
 { 
 
     int seq = thread_number + 1;
