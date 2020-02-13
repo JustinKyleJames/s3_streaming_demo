@@ -21,7 +21,8 @@ void doit(int thread_number,
           const char *bucket_name, 
           const char *access_key, 
           const char *secret_access_key, 
-          const char *filename);
+          const char *filename, 
+          bool read_flag);
 
 int main(int argc, char **argv) 
 { 
@@ -155,7 +156,7 @@ int main(int argc, char **argv)
         }
         writer_threads[thread_number] = std::move(std::thread(doit, thread_number, 
                     thread_count, file_size, debug_flag, hostname.c_str(), bucket_name.c_str(), 
-                    access_key.c_str(), secret_access_key.c_str(), filename.c_str()));
+                    access_key.c_str(), secret_access_key.c_str(), filename.c_str(), false));
     }
 
 
@@ -184,7 +185,7 @@ void doit(int thread_number,
           const char *access_key, 
           const char *secret_access_key, 
           const char *filename,
-          bool read_flag = false) 
+          bool read_flag) 
 { 
 
     int seq = thread_number + 1;
@@ -226,10 +227,11 @@ void doit(int thread_number,
      * This part actually goes in S3 plugin. *
      *****************************************/
 
-    s3_transport tp1{seq, current_buffer_size, thread_count, file_size, 1, 1, hostname, bucket_name, access_key, 
+    s3_transport tp1{file_size, 100, 1, 1, hostname, bucket_name, access_key, 
         secret_access_key, true, "V4", "http", "amz", true};
 
     odstream ds1{tp1, filename};
+    ds1.seekp(start);
     ds1.write(current_buffer, current_buffer_size);
 
     printf("WRITE DONE FOR %d\n", seq);

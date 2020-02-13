@@ -494,7 +494,17 @@ namespace irods::experimental::io
         int seq = data->seq;
         const char *etag = properties->eTag;
 
-        // update etags vector in shmem
+        // Update the etags vector.  It should be sized large enough
+        // to not require a resize but resize if necessary.
+        if (seq > shared_data->etags.size()) {
+            try {
+printf("%s:%d (%s) ========== resetting etags size to %d ==========\n", __FILE__, __LINE__, __FUNCTION__, seq);
+                shared_data->etags.resize(seq, shm_char_string_t("", alloc_inst));
+            } catch (std::bad_alloc& ba) {
+                return S3StatusOutOfMemory;
+            }
+        }
+
         if (etag) {
             shared_data->etags[seq - 1] = etag;
         } else {
@@ -611,10 +621,9 @@ namespace irods::experimental::io
 
     public:
 
-        explicit s3_transport(int _sequence,
-                              size_t _part_size,
-                              int _total_parts,
-                              size_t _object_size,
+        explicit s3_transport(size_t _object_size,
+                              int _number_of_transfer_threads,     // only used when doing full file upload/download via cache
+                                                                      // otherwise it is controlled by iRODS
                               size_t _retry_count_limit,
                               size_t _retry_wait,
                               const std::string& _hostname,
@@ -628,10 +637,8 @@ namespace irods::experimental::io
                               bool _debug_flag = false)
 
             : transport<CharT>{}
-            , sequence_{_sequence}
-            , part_size_{_part_size}
-            , total_parts_{_total_parts}
             , object_size_{_object_size}
+            , number_of_transfer_threads_{_number_of_transfer_threads}
             , retry_count_limit_{_retry_count_limit}
             , retry_wait_{_retry_wait}
             , hostname_{_hostname}
@@ -659,7 +666,6 @@ namespace irods::experimental::io
             memset(&mpu_data_, 0, sizeof(mpu_data_));
             mpu_data_.manager = &upload_manager_;
 
-            mpu_data_.seq = sequence_;
             mpu_data_.enable_md5 = s3GetEnableMD5();
             mpu_data_.server_encrypt = s3GetServerEncrypt();
 
@@ -791,8 +797,8 @@ namespace irods::experimental::io
                     }
 
                     if (debug_flag_) {
-                        printf("%s:%d (%s) join for part %d\n",
-                                __FILE__, __LINE__, __FUNCTION__, sequence_);
+                        printf("%s:%d (%s) join for part\n",
+                                __FILE__, __LINE__, __FUNCTION__);
                     }
 
                     fd_ = uninitialized_file_descriptor;
@@ -920,21 +926,21 @@ namespace irods::experimental::io
             circular_buffer_.push_back({copied_buffer, static_cast<size_t>(_buffer_size)});
 
             if (debug_flag_) {
-                printf("%s:%d (%s) [part=%d] wrote buffer of size %ld\n",
-                        __FILE__, __LINE__, __FUNCTION__, sequence_, _buffer_size);
+                printf("%s:%d (%s) wrote buffer of size %ld\n",
+                        __FILE__, __LINE__, __FUNCTION__, _buffer_size);
             }
 
             // only call s3_upload_part once for this thread / part
-            if (call_s3_upload_part_flag_) {
+            //if (call_s3_upload_part_flag_) {
 
-                call_s3_upload_part_flag_ = false;
+            //    call_s3_upload_part_flag_ = false;
 
                 // this has to go in the background because we are going to have multiple calls send() to fill up the data
                 // and this doesn't return until all the data is sent
                 begin_part_upload_thread_ptr_ =
                     new std::thread(&s3_transport::s3_upload_part_worker_routine, this);
 
-            }
+            //}
 
             return _buffer_size;
 
@@ -1117,6 +1123,8 @@ printf("%s:%d (%s) [multipart_flag_ = %d][use_cache_ = %d][open_flags & O_WRONLY
             }
 
             // go ahead and read the shared data
+            std::string mtx_name = object_key_ + "-mtx";
+            scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__);
 
             std::string shared_memory_name =  object_key_ + "-shm";
             bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
@@ -1128,33 +1136,27 @@ printf("%s:%d (%s) [multipart_flag_ = %d][use_cache_ = %d][open_flags & O_WRONLY
                 ("SharedData")(alloc_inst);
 
             ++(shared_data->file_open_cntr);
-
-            // first one in calls initiate, all else waits
-            std::string mtx_name = object_key_ + "-mtx";
-
+            
             std::string cache_file =  "/tmp" + object_key_ + "-cache";
 
             if (object_exists && download_to_cache_) {
 
                 std::string cache_file =  "/tmp" + object_key_ + "-cache";
 
-                // go ahead and lock while reading cache file
-                scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__);
-
                 if (!shared_data->cache_file_downloaded_flag) {
 
                     // go ahead and download the object to cache file
                     cache_fd_ = open(cache_file.c_str(), O_RDONLY);
 
-                    size_t part_size = object_size_ / total_parts_;
+                    size_t part_size = object_size_ / number_of_transfer_threads_;
 
                     unsigned long long usStart = usNow(); std::list<std::thread*> threads;
-                    for (int thr_id=0; thr_id < total_parts_; thr_id++) {
+                    for (int thr_id=0; thr_id < number_of_transfer_threads_; thr_id++) {
                         size_t buffer_size;
-                        if (thr_id == total_parts_ - 1) {
-                            buffer_size = part_size_ + (object_size_ - part_size_ * total_parts_);
+                        if (thr_id == number_of_transfer_threads_ - 1) {
+                            buffer_size = part_size + (object_size_ - part_size * number_of_transfer_threads_);
                         } else {
-                            buffer_size = part_size_;
+                            buffer_size = part_size;
                         }
 
                         std::thread *thisThread = new std::thread(&s3_transport::s3_download_part_worker_routine, this, nullptr, buffer_size);
@@ -1180,7 +1182,7 @@ printf("%s:%d (%s)\n", __FILE__, __LINE__, __FUNCTION__);
 
                 if (multipart_flag_) {
 
-                    // first one in initiates the multipart
+                    // first one in initiates the multipart (everyone has same lock)
                     if (shared_data->last_error >= 0 && shared_data->file_open_cntr == 1) {
 
                         // send initiate message to S3
@@ -1301,13 +1303,12 @@ printf("%s:%d (%s)\n", __FILE__, __LINE__, __FUNCTION__);
             shm_char_string_t key_str(object_key_.c_str(), alloc_inst);
             multipart_shared_data_t *shared_data = segment.find_or_construct<multipart_shared_data_t>
                 ("SharedData")(alloc_inst);
-            // Allocate all dynamic storage now, so we don't start a job we can't finish later
-            //manager.etags = (char**)calloc(sizeof(char*) * totalParts, 1);
-            try {
-                shared_data->etags.resize(total_parts_, shm_char_string_t("", alloc_inst));
+
+            /*try {
+                shared_data->etags.resize(number_of_transfer_threads_, shm_char_string_t("", alloc_inst));
             } catch (std::bad_alloc& ba) {
                 return SYS_MALLOC_ERR;   // not really malloc but close enough
-            }
+            }*/
 
             retry_cnt = 0;
             // These expect a upload_manager_t* as cbdata
@@ -1318,8 +1319,8 @@ printf("%s:%d (%s)\n", __FILE__, __LINE__, __FUNCTION__);
                 upload_manager_.pCtx = &bucket_context_;
                 print_bucket_context(bucket_context_);
                 if (debug_flag_) {
-                    printf("%s:%d (%s) [part=%d] call S3_initiate_multipart [object_key=%s]\n",
-                            __FILE__, __LINE__, __FUNCTION__, sequence_, object_key_.c_str());
+                    printf("%s:%d (%s) call S3_initiate_multipart [object_key=%s]\n",
+                            __FILE__, __LINE__, __FUNCTION__, object_key_.c_str());
                 }
                 S3_initiate_multipart(&bucket_context_, object_key_.c_str(),
                         &put_props_, &mpuInitialHandler, nullptr, &upload_manager_);
@@ -1334,9 +1335,8 @@ printf("%s:%d (%s)\n", __FILE__, __LINE__, __FUNCTION__);
             }
 
             if (debug_flag_) {
-                printf("%s:%d (%s) [part=%d] S3_initiate_multipart returned.  Upload ID = %s\n",
-                        __FILE__, __LINE__, __FUNCTION__, sequence_,
-                        shared_data->upload_id.c_str());
+                printf("%s:%d (%s) S3_initiate_multipart returned.  Upload ID = %s\n",
+                        __FILE__, __LINE__, __FUNCTION__, shared_data->upload_id.c_str());
             }
             upload_manager_.remaining = 0;
             upload_manager_.offset  = 0;
@@ -1417,7 +1417,7 @@ printf("%s:%d (%s)\n", __FILE__, __LINE__, __FUNCTION__);
                 xml << "<CompleteMultipartUpload>\n";
                 char buf[256];
                 int n;
-                for ( i = 0; i < total_parts_; i++ ) {
+                for ( i = 0; i < shared_data->etags.size(); i++ ) {
                     xml << "<Part><PartNumber>";
                     xml << (i + 1);
                     xml << "</PartNumber><ETag>";
@@ -1576,6 +1576,24 @@ printf("%s:%d (%s)\n", __FILE__, __LINE__, __FUNCTION__);
 
             size_t retry_cnt = 0;
 
+            // determine the sequence number from the offset, file size, and buffer size
+            // the last page might be larger so doing a little trick to handle that case (second term)
+            int sequence = (file_offset_ / page.buffer_size) + (file_offset_ % page.buffer_size == 0 ? 0 : 1) + 1;
+
+            // estimate the size and resize the etags vector
+            int number_of_parts = object_size_ / page.buffer_size;
+            number_of_parts = number_of_parts < sequence ? sequence : number_of_parts;
+
+            if (number_of_parts > shared_data->etags.size()) {
+printf("%s:%d (%s) ========== setting etags size to %d ==========\n", __FILE__, __LINE__, __FUNCTION__, number_of_parts);
+                try {
+                    shared_data->etags.resize(number_of_parts, shm_char_string_t("", alloc_inst));
+                } catch (std::bad_alloc& ba) {
+printf("%s:%d (%s) ========== MALLOC ERROR resizing to %d ==========\n", __FILE__, __LINE__, __FUNCTION__, number_of_parts);
+                    shared_data->last_error = SYS_MALLOC_ERR;
+                }
+            }
+
             do {
 
                 // Work on a local copy of the structure in case an error occurs in the middle
@@ -1583,18 +1601,16 @@ printf("%s:%d (%s)\n", __FILE__, __LINE__, __FUNCTION__);
                 // at the wrong offset and length.
                 partData = mpu_data_;
                 partData.debug_flag = debug_flag_;
-                partData.seq = sequence_;
+                partData.seq = sequence;
                 partData.put_object_data.pCtx = &bucket_context_;
                 partData.put_object_data.original_bytes_ptr
                     = partData.put_object_data.bytes = page.buffer;
                 partData.put_object_data.circular_buffer_ptr = &(s3_transport::circular_buffer_);
-                partData.put_object_data.buffer_size = page.buffer_size;
-
-                partData.put_object_data.contentLength = part_size_;
+                partData.put_object_data.buffer_size = partData.put_object_data.contentLength = page.buffer_size;
 
                 if (debug_flag_) {
                     std::stringstream msg;
-                    msg << "Multipart:  Start part " << (int)sequence_ << ", key \""
+                    msg << "Multipart:  Start part " << (int)sequence << ", key \""
                         << object_key_ << "\", uploadid \"" << upload_id
                         << "\", len " << (int)partData.put_object_data.contentLength;
                     printf( "%s:%d (%s) %s\n", __FILE__, __LINE__, __FUNCTION__,
@@ -1615,16 +1631,16 @@ printf("%s:%d (%s)\n", __FILE__, __LINE__, __FUNCTION__);
                 if (debug_flag_) {
                     printf("%s:%d (%s) S3_upload_part (ctx, key, props, handler, %d, "
                            "uploadId, %lld, 0, partData)\n", __FILE__, __LINE__, __FUNCTION__,
-                           sequence_, partData.put_object_data.contentLength);
+                           sequence, partData.put_object_data.contentLength);
                 }
 
                 S3_upload_part(&bucket_context_, object_key_.c_str(), &put_props_,
-                        &putObjectHandler, sequence_, upload_id.c_str(),
-                        part_size_, 0, &partData);
+                        &putObjectHandler, sequence, upload_id.c_str(),
+                        page.buffer_size, 0, &partData);
 
                 if (debug_flag_) {
                     printf("%s:%d (%s) S3_upload_part returned [part=%d].\n",
-                            __FILE__, __LINE__, __FUNCTION__, sequence_);
+                            __FILE__, __LINE__, __FUNCTION__, sequence);
                 }
 
                 unsigned long long usEnd = usNow();
@@ -1646,12 +1662,10 @@ printf("%s:%d (%s)\n", __FILE__, __LINE__, __FUNCTION__);
             }
         }
 
-        int                       sequence_;
-        size_t                    part_size_;
         int                       fd_;
         nlohmann::json            fd_info_;
-        int                       total_parts_;
         size_t                    object_size_;
+        int                       number_of_transfer_threads_;
         size_t                    retry_count_limit_;
         size_t                    retry_wait_;
         std::string               hostname_;
