@@ -32,6 +32,8 @@ void usage()
 int main(int argc, char **argv) 
 { 
 
+    setbuf(stdout, nullptr);
+
     namespace bi = boost::interprocess;
 
     std::cout << argc << std::endl;
@@ -252,10 +254,10 @@ void upload_part(int thread_number,
                  const char *filename)
 { 
 
-    int seq = thread_number + 1;
 
     if (debug_flag) {
-        printf("%s:%d (%s) [upload thread=%u, seq=%u] writing from file into s3\n", __FILE__, __LINE__, __FUNCTION__, thread_number, seq);
+        printf("%s:%d (%s) [upload thread=%u, seq=%u] writing from file into s3\n", 
+                __FILE__, __LINE__, __FUNCTION__, thread_number, thread_number);
     }
 
     // thread in irods only deal with sequential bytes.  figure out what bytes this thread deals with
@@ -284,7 +286,7 @@ void upload_part(int thread_number,
 
     if (debug_flag) {
         printf("%s:%d (%s) [thread=%u, seq=%u] done reading file\n", 
-                __FILE__, __LINE__, __FUNCTION__, thread_number, seq);
+                __FILE__, __LINE__, __FUNCTION__, thread_number, thread_number);
     }
 
     /*****************************************
@@ -292,17 +294,17 @@ void upload_part(int thread_number,
      *****************************************/
 
     s3_transport tp1{file_size, 100, 1, 1, hostname, bucket_name, access_key, 
-        secret_access_key, true, "V4", "http", "amz", true};
+        secret_access_key, true, "V4", "http", "amz", true, thread_number};
 
     odstream ds1{tp1, filename};
     ds1.seekp(start);
     ds1.write(current_buffer, current_buffer_size);
 
-    printf("WRITE DONE FOR %d\n", seq);
+    printf("WRITE DONE FOR %d\n", thread_number);
 
     // will be automatic
     ds1.close();
-    printf("CLOSE DONE FOR %d\n", seq);
+    printf("CLOSE DONE FOR %d\n", thread_number);
 
     /*****************************************/
 
@@ -337,11 +339,9 @@ void download_part(int thread_number,
           secret_access_key, 
           filename);
 
-    int seq = thread_number + 1;
-
     if (debug_flag) {
         printf("%s:%d (%s) [download thread=%u, seq=%u] reading from s3 into file \n", 
-                __FILE__, __LINE__, __FUNCTION__, thread_number, seq);
+                __FILE__, __LINE__, __FUNCTION__, thread_number, thread_number);
     }
 
     // thread in irods only deal with sequential bytes.  figure out what bytes this 
@@ -365,7 +365,7 @@ void download_part(int thread_number,
     }
 
     size_t current_buffer_size = end - start;
-    char *current_buffer = new char[current_buffer_size];
+    char *current_buffer = static_cast<char*>(malloc(current_buffer_size * sizeof(char)));
 
     /*****************************************
      * This part actually goes in S3 plugin. *
@@ -375,31 +375,31 @@ void download_part(int thread_number,
             file_size, 100, 1, 1, hostname, bucket_name, access_key,
             secret_access_key, true, "V4", "http", "amz", true);
     s3_transport tp1{file_size, 100, 1, 1, hostname, bucket_name, access_key, 
-        secret_access_key, true, "V4", "http", "amz", true};
+        secret_access_key, true, "V4", "http", "amz", true, thread_number};
 
     idstream ds1{tp1, filename};
     ds1.seekg(start);
-    ds1.read((char*)current_buffer, current_buffer_size);
+    ds1.read(current_buffer, current_buffer_size);
 
     /*****************************************/
+
+    printf("write at %ld of size %ld\n", start, current_buffer_size);
 
     ofs.seekp(start, std::ios::beg);
     ofs.write(current_buffer, current_buffer_size);
     ofs.close();
 
-    printf("READ DONE FOR %d\n", seq);
+    printf("READ DONE FOR %d\n", thread_number);
 
     // will be automatic
     ds1.close();
-    printf("CLOSE DONE FOR %d\n", seq);
+    printf("CLOSE DONE FOR %d\n", thread_number);
 
+    //delete[] current_buffer;
+    free(current_buffer);
     /*****************************************/
-
 
     // s3FileWrite copies its buffer so that iRODS can delete it after
     // s3FileWrite returns
-    delete[] current_buffer;
     
-    ofs.close();
-
 }
