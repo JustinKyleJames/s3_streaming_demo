@@ -384,20 +384,17 @@ namespace irods::experimental::io
 
             // writing to buffer
 
-            int bytes_to_write = libs3_buffer_size; //cb->offset + bufferSize > cb->output_buffer_size 
-                    //? cb->output_buffer_size - cb->offset 
-                    //: bufferSize;
-
-//printf("%s:%d (%s) [[%d]] [bytes_to_write=%d][cb->offset=%lu][cb->output_buffer_size=%lu]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_,
-//        bytes_to_write, cb->offset, cb->output_buffer_size);
+            int bytes_to_write = //libs3_buffer_size; 
+                  cb->offset + libs3_buffer_size > cb->output_buffer_size 
+                ? cb->output_buffer_size - cb->offset 
+                : libs3_buffer_size;
 
             memcpy(cb->output_buffer + cb->offset, libs3_buffer, bytes_to_write);
 
             cb->offset += bytes_to_write;
 
-            /*return ((bytes_to_write < (ssize_t) bufferSize) ?
-                    S3StatusAbortedByCallback : S3StatusOK);*/
-            return S3StatusOK;
+            return ((bytes_to_write < (ssize_t) libs3_buffer_size) ?
+                    S3StatusAbortedByCallback : S3StatusOK);
         }
     }
 
