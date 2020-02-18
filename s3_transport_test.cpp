@@ -7,6 +7,7 @@
 #include <fstream>
 #include <thread>
 #include <chrono>
+#include <sys/wait.h>
 
 const long transfer_buffer_size_for_parallel_transfer_in_megabytes = 4;
 
@@ -38,7 +39,7 @@ int main(int argc, char **argv)
 
     std::cout << argc << std::endl;
 
-    if (3 != argc && 4 != argc) { 
+    if (argc < 3 || argc > 5) { 
         usage();
         return 1; 
     }
@@ -52,8 +53,6 @@ int main(int argc, char **argv)
         }
     }
          
-
-
     // Remove shared memory on construction and destruction
     //struct shm_remove
     //{
@@ -127,6 +126,9 @@ int main(int argc, char **argv)
     json_t *debug_flag_json_object = json_object_get(root, "debug_flag");
     bool debug_flag = json_is_true(debug_flag_json_object) ? true : false;
 
+    json_t *use_multiprocess_flag_json_object = json_object_get(root, "use_multiprocess_flag");
+    bool use_multiprocess_flag = json_is_true(use_multiprocess_flag_json_object) ? true : false;
+
     // AWS
     std::string access_key;
     std::string secret_access_key;
@@ -173,32 +175,65 @@ int main(int argc, char **argv)
 
     if (mode == "upload" || mode == "both") {
 
-        std::thread *writer_threads = new std::thread[thread_count];
+        if (use_multiprocess_flag) {
 
-        for (int thread_number = 0; thread_number <  thread_count; ++thread_number) {
-            if (debug_flag) {
-                printf("%s:%d (%s) start thread %d\n", __FILE__, __LINE__, __FUNCTION__, 
-                        thread_number);
+            // multiple processes
+            
+            bool parent = true;
+
+            for (int process_number = 0; process_number < thread_count; ++process_number) {
+                if (debug_flag) {
+                    printf("%s:%d (%s) [%d] start process %d\n", __FILE__, __LINE__, __FUNCTION__, 
+                            getpid(), process_number);
+                }
+
+                if (parent) {
+                    if (fork() == 0) {
+                        parent = false;
+                        upload_part(process_number, thread_count, file_size, debug_flag, hostname.c_str(), bucket_name.c_str(), 
+                                    access_key.c_str(), secret_access_key.c_str(), filename.c_str());
+                    }
+                }
             }
-            writer_threads[thread_number] = std::move(std::thread(upload_part, thread_number, 
-                        thread_count, file_size, debug_flag, hostname.c_str(), bucket_name.c_str(), 
-                        access_key.c_str(), secret_access_key.c_str(), filename.c_str()));
-        }
 
-
-        for (int thread_number = 0; thread_number <  thread_count; ++thread_number) {
-            if (debug_flag) {
-                printf("%s:%d (%s) calling join for writer thread %d\n", __FILE__, __LINE__, 
-                        __FUNCTION__, thread_number);
+            if (parent) {
+                int pid;
+                while ((pid = wait(nullptr)) > 0) {
+                    printf("%s:%d (%s) process %d finished\n", __FILE__, __LINE__, __FUNCTION__, pid);
+                }
             }
-            writer_threads[thread_number].join();
-            if (debug_flag) {
-                printf("%s:%d (%s) joined writer thread %d\n", __FILE__, __LINE__, 
-                        __FUNCTION__, thread_number);
-            }
-        }
 
-        delete[] writer_threads;
+        } else {
+
+            // multiple threads
+
+            std::thread *writer_threads = new std::thread[thread_count];
+
+            for (int thread_number = 0; thread_number <  thread_count; ++thread_number) {
+                if (debug_flag) {
+                    printf("%s:%d (%s) start thread %d\n", __FILE__, __LINE__, __FUNCTION__, 
+                            thread_number);
+                }
+                writer_threads[thread_number] = std::move(std::thread(upload_part, thread_number, 
+                            thread_count, file_size, debug_flag, hostname.c_str(), bucket_name.c_str(), 
+                            access_key.c_str(), secret_access_key.c_str(), filename.c_str()));
+            }
+
+
+            for (int thread_number = 0; thread_number <  thread_count; ++thread_number) {
+                if (debug_flag) {
+                    printf("%s:%d (%s) calling join for writer thread %d\n", __FILE__, __LINE__, 
+                            __FUNCTION__, thread_number);
+                }
+                writer_threads[thread_number].join();
+                if (debug_flag) {
+                    printf("%s:%d (%s) joined writer thread %d\n", __FILE__, __LINE__, 
+                            __FUNCTION__, thread_number);
+                }
+            }
+
+            delete[] writer_threads;
+        } 
 
     }
 
@@ -210,32 +245,62 @@ int main(int argc, char **argv)
             std::this_thread::sleep_for (std::chrono::seconds(5));
         }
 
-        std::thread *reader_threads = new std::thread[thread_count];
+        if (use_multiprocess_flag) {
 
-        for (int thread_number = 0; thread_number <  thread_count; ++thread_number) {
-            if (debug_flag) {
-                printf("%s:%d (%s) start reader thread %d\n", __FILE__, __LINE__, __FUNCTION__, 
-                        thread_number);
+            // multiple processes
+            
+            bool parent = true;
+
+            for (int process_number = 0; process_number < thread_count; ++process_number) {
+                if (debug_flag) {
+                    printf("%s:%d (%s) start process %d\n", __FILE__, __LINE__, __FUNCTION__, 
+                            process_number);
+                }
+
+                if (parent) {
+                    if (fork() == 0) {
+                        parent = false;
+                        download_part(process_number, thread_count, file_size, debug_flag, hostname.c_str(), bucket_name.c_str(), 
+                                    access_key.c_str(), secret_access_key.c_str(), filename.c_str());
+                    }
+                }
             }
-            reader_threads[thread_number] = std::move(std::thread(download_part, thread_number, 
-                        thread_count, file_size, debug_flag, hostname.c_str(), bucket_name.c_str(), 
-                        access_key.c_str(), secret_access_key.c_str(), filename.c_str()));
+
+            if (parent) {
+                int pid;
+                while ((pid = wait(nullptr)) > 0) {
+                    printf("%s:%d (%s) process %d finished\n", __FILE__, __LINE__, __FUNCTION__, pid);
+                }
+            }
+
+        } else {
+            std::thread *reader_threads = new std::thread[thread_count];
+
+            for (int thread_number = 0; thread_number <  thread_count; ++thread_number) {
+                if (debug_flag) {
+                    printf("%s:%d (%s) start reader thread %d\n", __FILE__, __LINE__, __FUNCTION__, 
+                            thread_number);
+                }
+                reader_threads[thread_number] = std::move(std::thread(download_part, thread_number, 
+                            thread_count, file_size, debug_flag, hostname.c_str(), bucket_name.c_str(), 
+                            access_key.c_str(), secret_access_key.c_str(), filename.c_str()));
+            }
+
+
+            for (int thread_number = 0; thread_number <  thread_count; ++thread_number) {
+                if (debug_flag) {
+                    printf("%s:%d (%s) calling join for reader thread %d\n", __FILE__, __LINE__, 
+                            __FUNCTION__, thread_number);
+                }
+                reader_threads[thread_number].join();
+                if (debug_flag) {
+                    printf("%s:%d (%s) joined reader thread %d\n", __FILE__, __LINE__, 
+                            __FUNCTION__, thread_number);
+                }
+            }
+
+            delete[] reader_threads;
         }
-
-
-        for (int thread_number = 0; thread_number <  thread_count; ++thread_number) {
-            if (debug_flag) {
-                printf("%s:%d (%s) calling join for reader thread %d\n", __FILE__, __LINE__, 
-                        __FUNCTION__, thread_number);
-            }
-            reader_threads[thread_number].join();
-            if (debug_flag) {
-                printf("%s:%d (%s) joined reader thread %d\n", __FILE__, __LINE__, 
-                        __FUNCTION__, thread_number);
-            }
-        }
-
-        delete[] reader_threads;
 
     }
 
@@ -294,7 +359,7 @@ void upload_part(int thread_number,
      *****************************************/
 
     s3_transport tp1{file_size, 100, 1, 1, hostname, bucket_name, access_key, 
-        secret_access_key, true, "V4", "http", "amz", true, thread_number};
+        secret_access_key, true, 60, false, false, "V4", "http", "amz", true, thread_number};
 
     odstream ds1{tp1, filename};
     ds1.seekp(start);
@@ -375,7 +440,7 @@ void download_part(int thread_number,
             file_size, 100, 1, 1, hostname, bucket_name, access_key,
             secret_access_key, true, "V4", "http", "amz", true);
     s3_transport tp1{file_size, 100, 1, 1, hostname, bucket_name, access_key, 
-        secret_access_key, true, "V4", "http", "amz", true, thread_number};
+        secret_access_key, true, 60, false, false, "V4", "http", "amz", true, thread_number};
 
     idstream ds1{tp1, filename};
     ds1.seekg(start);
