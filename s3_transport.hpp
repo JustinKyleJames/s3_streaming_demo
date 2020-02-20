@@ -140,18 +140,6 @@ namespace irods::experimental::io
     };
 
 
-    /*namespace s3_transport_interprocess_types {
-
-        using multipart_shared_data_allocator = bi::allocator<multipart_shared_data, segment_manager>;
-        using map_value_type                  = std::pair<const shm_char_string, multipart_shared_data>;
-    }*/
-
-    /*typedef bi::allocator<map_value_type,
-            segment_manager>                                   map_value_type_allocator;
-    typedef bi::map<shm_char_string, multipart_shared_data,
-            std::less<shm_char_string>,
-            map_value_type_allocator>                            multipart_shared_data;*/
-
     multipart_shared_data *get_shared_data_with_timeout(const std::string& key, 
                                                         s3_transport_interprocess_types::void_allocator& alloc_inst, 
                                                         boost::interprocess::managed_shared_memory& segment, 
@@ -163,6 +151,7 @@ namespace irods::experimental::io
         time_t now = time(0);
 
         if (now - shared_data->last_access_time > shared_memory_timeout) {
+
             // the shmem has expired, delete and start over
             // TODO reset the fields rather than destroy it
             segment.destroy<multipart_shared_data>(key.c_str());
@@ -191,6 +180,39 @@ namespace irods::experimental::io
                bucket_context.stsDate);
     }
 
+
+    void StoreAndLogStatus (S3Status status,
+                            const S3ErrorDetails *error,
+                            const char *function,
+                            const S3BucketContext *pCtx,
+                            S3Status *pStatus,
+                            bool debug_flag = false )
+    {
+        int i;
+
+        *pStatus = status;
+        if( debug_flag || status != S3StatusOK ) {
+            printf( "  S3Status: [%s] - %d\n", S3_get_status_name( status ), (int) status );
+            printf( "    S3Host: %s\n", pCtx->hostName );
+        }
+
+        if ((debug_flag || status != S3StatusOK) && function )
+            printf( "  Function: %s\n", function );
+        if ((debug_flag || error) && error->message)
+            printf( "  Message: %s\n", error->message);
+        if ((debug_flag || error) && error->resource)
+            printf( "  Resource: %s\n", error->resource);
+        if ((debug_flag || error) && error->furtherDetails)
+            printf( "  Further Details: %s\n", error->furtherDetails);
+        if ((debug_flag || error) && error->extraDetailsCount) {
+            printf( "%s", "  Extra Details:\n");
+
+            for (i = 0; i < error->extraDetailsCount; i++) {
+                printf( "    %s: %s\n", error->extraDetails[i].name,
+                        error->extraDetails[i].value);
+            }
+        }
+    }  // end StoreAndLogStatus
 
 
     struct upload_page {
@@ -238,8 +260,38 @@ namespace irods::experimental::io
 
         public:
 
-            virtual S3Status read_callback_operator(int libs3_buffer_size,
-                                                    const char *libs3_buffer) = 0;
+            virtual S3Status read_data_callback(int libs3_buffer_size,
+                                                const char *libs3_buffer) = 0;
+
+            static S3Status s3_read_data_callback_routine(int bufferSize,
+                                                          const char *buffer,
+                                                          void *callbackData)
+            {
+                s3_read_callback *data = (s3_read_callback*)callbackData; 
+                return data->read_data_callback(bufferSize, buffer);
+            }
+
+            static S3Status read_data_response_properties_callback(const S3ResponseProperties *properties,
+                                                                   void *callbackData)
+            {
+                // Don't need to do anything here
+                return S3StatusOK;
+            }
+
+            static void read_data_response_completion_callback (S3Status status,
+                                                                const S3ErrorDetails *error,
+                                                                void *callbackData)
+            {
+                s3_read_callback *data = (s3_read_callback*)callbackData; 
+                StoreAndLogStatus( status, error, __FUNCTION__, data->pCtx, &(data->status), 
+                        data->debug_flag );
+                // Don't change the global error, we may want to retry at a higher level.
+                // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
+            }
+
+            virtual ~s3_read_callback() {};
+
+            int             seq;
 
             long            offset;       /* For multiple upload */
             rodsLong_t      contentLength;
@@ -248,13 +300,14 @@ namespace irods::experimental::io
             int             keyCount;
             s3_stat         stat;    /* should be a pointer if keyCount > 1 */
             S3BucketContext *pCtx; /* To enable more detailed error messages */
+            bool            debug_flag;
     };
 
     class s3_read_callback_to_cache : public s3_read_callback {
 
         public:
 
-            S3Status read_callback_operator(int libs3_buffer_size,
+            S3Status read_data_callback(int libs3_buffer_size,
                                             const char *libs3_buffer) 
             {
 
@@ -267,6 +320,7 @@ namespace irods::experimental::io
                         S3StatusAbortedByCallback : S3StatusOK);
 
             }
+            ~s3_read_callback_to_cache() {};
 
             int cache_fd;
     };
@@ -275,7 +329,7 @@ namespace irods::experimental::io
 
         public:
 
-            S3Status read_callback_operator(int libs3_buffer_size,
+            S3Status read_data_callback(int libs3_buffer_size,
                                             const char *libs3_buffer) 
             {
                 // writing to buffer
@@ -294,63 +348,13 @@ namespace irods::experimental::io
 
             }
 
+            ~s3_read_callback_to_buffer() {};
+
             char            *output_buffer;
             size_t          output_buffer_size;
 
     };
         
-    // callback data for reads
-    // TODO callback_data_for_read
-    // TODO two different structs *for_cache_read, *for_object_read
-    struct callback_data_for_read_to_cache
-    {
-        int             cache_fd;
-
-        long            offset;       /* For multiple upload */
-        rodsLong_t      contentLength;
-        rodsLong_t      originalContentLength;
-        S3Status        status;
-        int             keyCount;
-
-        s3_stat         stat;    /* should be a pointer if keyCount > 1 */
-
-        S3BucketContext *pCtx; /* To enable more detailed error messages */
-    };
-
-    struct callback_data_for_read_to_buffer
-    {
-        char            *output_buffer;
-        size_t          output_buffer_size;
-
-        long            offset;       /* For multiple upload */
-        rodsLong_t      contentLength;
-        rodsLong_t      originalContentLength;
-        S3Status        status;
-        int             keyCount;
-
-        s3_stat         stat;    /* should be a pointer if keyCount > 1 */
-
-        S3BucketContext *pCtx; /* To enable more detailed error messages */
-    };
-
-    struct multirange_download_data_to_buffer
-    {
-        int                               seq;
-        callback_data_for_read_to_buffer  get_object_data;
-        S3Status                          status;
-        S3BucketContext                   *pCtx; // To enable more detailed error messages
-        bool                              debug_flag;
-    };
-
-    struct multirange_download_data_to_cache
-    {
-        int                              seq;
-        callback_data_for_read_to_cache  get_object_data;
-        S3Status                         status;
-        S3BucketContext                  *pCtx; // To enable more detailed error messages
-        bool                             debug_flag;
-    };
-
     const size_t S3_DEFAULT_RETRY_WAIT_SEC = 1;
     const size_t S3_DEFAULT_RETRY_COUNT = 1;
 
@@ -399,39 +403,6 @@ namespace irods::experimental::io
         int                      object_identifier;
         time_t                   shared_memory_timeout;
     };
-
-    void StoreAndLogStatus (S3Status status,
-                            const S3ErrorDetails *error,
-                            const char *function,
-                            const S3BucketContext *pCtx,
-                            S3Status *pStatus,
-                            bool debug_flag = false )
-    {
-        int i;
-
-        *pStatus = status;
-        if( debug_flag || status != S3StatusOK ) {
-            printf( "  S3Status: [%s] - %d\n", S3_get_status_name( status ), (int) status );
-            printf( "    S3Host: %s\n", pCtx->hostName );
-        }
-
-        if ((debug_flag || status != S3StatusOK) && function )
-            printf( "  Function: %s\n", function );
-        if ((debug_flag || error) && error->message)
-            printf( "  Message: %s\n", error->message);
-        if ((debug_flag || error) && error->resource)
-            printf( "  Resource: %s\n", error->resource);
-        if ((debug_flag || error) && error->furtherDetails)
-            printf( "  Further Details: %s\n", error->furtherDetails);
-        if ((debug_flag || error) && error->extraDetailsCount) {
-            printf( "%s", "  Extra Details:\n");
-
-            for (i = 0; i < error->extraDetailsCount; i++) {
-                printf( "    %s: %s\n", error->extraDetails[i].name,
-                        error->extraDetails[i].value);
-            }
-        }
-    }  // end StoreAndLogStatus
 
     S3Status mpuInitXmlCB (const char* upload_id,
                            void *callbackData )
@@ -513,76 +484,8 @@ namespace irods::experimental::io
         // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
     } // end mpuCommitRespCompCB
 
-    S3Status getObjectDataCallbackToBuffer(int libs3_buffer_size,
-                                           const char *libs3_buffer,
-                                           void *callbackData)
-    {
-        callback_data_for_read_to_buffer *cb = (callback_data_for_read_to_buffer*)callbackData;
-
-        // writing to buffer
-
-        int bytes_to_write = //libs3_buffer_size; 
-              cb->offset + libs3_buffer_size > cb->output_buffer_size 
-            ? cb->output_buffer_size - cb->offset 
-            : libs3_buffer_size;
-
-        memcpy(cb->output_buffer + cb->offset, libs3_buffer, bytes_to_write);
-
-        cb->offset += bytes_to_write;
-
-        return ((bytes_to_write < (ssize_t) libs3_buffer_size) ?
-                S3StatusAbortedByCallback : S3StatusOK);
-    }
-
-    S3Status getObjectDataCallbackToCache(int libs3_buffer_size,
-                                          const char *libs3_buffer,
-                                          void *callbackData)
-    {
-        callback_data_for_read_to_cache *cb = (callback_data_for_read_to_cache *)callbackData;
-
-        // writing output to cache file
-
-        ssize_t wrote = pwrite(cb->cache_fd, libs3_buffer, libs3_buffer_size, cb->offset);
-        if (wrote>0) cb->offset += wrote;
-
-        return ((wrote < (ssize_t) libs3_buffer_size) ?
-                S3StatusAbortedByCallback : S3StatusOK);
-    }
 
     // TODO put all callbacks into a namespace that identifies the type
-    S3Status mrdRangeGetDataCBToBuffer(int bufferSize,
-                                       const char *buffer,
-                                       void *callbackData)
-    {
-        multirange_download_data_to_buffer *data = (multirange_download_data_to_buffer*)callbackData;
-        return getObjectDataCallbackToBuffer( bufferSize, buffer, &(data->get_object_data) );
-    }
-
-    S3Status mrdRangeGetDataCBToCache(int bufferSize,
-                                      const char *buffer,
-                                      void *callbackData)
-    {
-        multirange_download_data_to_cache *data = (multirange_download_data_to_cache*)callbackData;
-        return getObjectDataCallbackToCache( bufferSize, buffer, &(data->get_object_data) );
-    }
-
-    S3Status mrdRangeRespPropCB(const S3ResponseProperties *properties,
-                                void *callbackData)
-    {
-        // Don't need to do anything here
-        return S3StatusOK;
-    }
-
-    void mrdRangeRespCompCB (S3Status status,
-                             const S3ErrorDetails *error,
-                             void *callbackData)
-    {
-        multirange_download_data_to_buffer *data = (multirange_download_data_to_buffer*)callbackData;
-        StoreAndLogStatus( status, error, __FUNCTION__, data->pCtx, &(data->status), 
-                data->debug_flag );
-        // Don't change the global error, we may want to retry at a higher level.
-        // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
-    }
 
     int putObjectDataCallback(int libs3_buffer_size,
                               char *libs3_buffer,
@@ -1047,7 +950,7 @@ namespace irods::experimental::io
                                 std::streamsize _buffer_size) override
         {
             // just get what is asked for
-            s3_download_part_to_buffer_worker_routine(_buffer, _buffer_size);
+            s3_download_part_worker_routine(_buffer, _buffer_size);
             return _buffer_size;
         }
 
@@ -1337,8 +1240,8 @@ namespace irods::experimental::io
                             this_part_size = part_size;
                         }
 
-                        std::thread *this_thread= new std::thread(&s3_transport::s3_download_part_to_cache_worker_routine, 
-                                this, this_part_size);
+                        std::thread *this_thread= new std::thread(&s3_transport::s3_download_part_worker_routine, 
+                                this, nullptr, this_part_size);
                         threads.push_back(this_thread);
 
                     }
@@ -1636,82 +1539,8 @@ namespace irods::experimental::io
             return result;
         } // end complete_multipart_upload
 
-        void s3_download_part_to_cache_worker_routine(size_t length)
-        {
-            namespace bi = boost::interprocess;
-            namespace types = s3_transport_interprocess_types;
-
-            // read upload_id from shmem
-            std::string shared_memory_name =  object_key_ + "-shm";
-            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
-
-            types::void_allocator alloc_inst(segment.get_segment_manager());
-            multipart_shared_data *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
-                    segment, shared_memory_timeout_);
-            std::string download_id = shared_data->download_id.c_str();
-
-            std::stringstream msg;
-
-            size_t retry_cnt = 0;
-            multirange_download_data_to_cache rangeData;
-            do {
-
-                S3GetObjectHandler getObjectHandler = { {mrdRangeRespPropCB, mrdRangeRespCompCB }, mrdRangeGetDataCBToCache};
-
-                rangeData.pCtx = &bucket_context_;
-                rangeData.get_object_data.contentLength = length;
-                rangeData.get_object_data.offset = 0;
-                rangeData.get_object_data.cache_fd = cache_fd_;
-                rangeData.debug_flag = debug_flag_;
-
-
-                if (debug_flag_) {
-                    msg.str( std::string() ); // Clear
-                    msg << "Multirange:  Start range key \"" << object_key_ << "\", offset "
-                        << (long)rangeData.get_object_data.offset << ", len " 
-                        << (int)rangeData.get_object_data.contentLength;
-                    printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, 
-                            msg.str().c_str());
-                }
-
-                unsigned long long usStart = usNow();
-                print_bucket_context(bucket_context_);
-                S3_get_object( &bucket_context_, object_key_.c_str(), NULL, 
-                        file_offset_,
-                        //rangeData.get_object_data.offset,
-                        rangeData.get_object_data.contentLength, 0, 
-                        &getObjectHandler, &rangeData );
-
-                if (debug_flag_) {
-                    unsigned long long usEnd = usNow();
-                    double bw = (rangeData.get_object_data.contentLength / (1024.0*1024.0)) /
-                        ( (usEnd - usStart) / 1000000.0 );
-                    msg << " -- END -- BW=" << bw << " MB/s";
-                    printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, msg.str().c_str());
-                }
-
-                if (rangeData.status != S3StatusOK) s3_sleep( retry_wait_, 0 );
-
-            } while ((rangeData.status != S3StatusOK) && S3_status_is_retryable(rangeData.status) 
-                    && (++retry_cnt < retry_count_limit_));
-
-            if (rangeData.status != S3StatusOK) {
-                msg.str( std::string() ); // Clear
-                msg << " - Error getting the S3 object: \"" << object_key_ << " ";
-                if (rangeData.status >= 0) {
-                    msg << " - \"" << S3_get_status_name( rangeData.status ) << "\"";
-                }
-                printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, msg.str().c_str());
-            }
-
-            if (rangeData.status != S3StatusOK) {
-                shared_data->last_error = S3_GET_ERROR;
-            }
-
-        } // end s3_download_part_to_cache_worker_routine
-
         // this function is called in the background in a separate thread
-        void s3_download_part_to_buffer_worker_routine(char *buffer, size_t length)
+        void s3_download_part_worker_routine(char *buffer, size_t length)
         {
             namespace bi = boost::interprocess;
             namespace types = s3_transport_interprocess_types;
@@ -1728,24 +1557,37 @@ namespace irods::experimental::io
             std::stringstream msg;
 
             size_t retry_cnt = 0;
-            multirange_download_data_to_buffer rangeData;
+
+            s3_read_callback *read_callback_data;
             do {
 
-                S3GetObjectHandler getObjectHandler = { {mrdRangeRespPropCB, mrdRangeRespCompCB }, mrdRangeGetDataCBToBuffer};
+                S3GetObjectHandler getObjectHandler = { 
+                    { 
+                        s3_read_callback::read_data_response_properties_callback, 
+                        s3_read_callback::read_data_response_completion_callback 
+                    }, 
+                    s3_read_callback::s3_read_data_callback_routine
+                };
 
-                rangeData.pCtx = &bucket_context_;
-                rangeData.get_object_data.contentLength = length;
-                rangeData.get_object_data.offset = 0;
-                rangeData.get_object_data.output_buffer = buffer;
-                rangeData.get_object_data.output_buffer_size = length;
-                rangeData.debug_flag = debug_flag_;
+                if (buffer == nullptr) {
+                    read_callback_data = new s3_read_callback_to_cache();
+                    static_cast<s3_read_callback_to_cache*>(read_callback_data)->cache_fd = cache_fd_;
+                } else {
+                    read_callback_data = new s3_read_callback_to_buffer();
+                    static_cast<s3_read_callback_to_buffer*>(read_callback_data)->output_buffer = buffer;
+                    static_cast<s3_read_callback_to_buffer*>(read_callback_data)->output_buffer_size = length;
 
+                }
+                read_callback_data->pCtx = &bucket_context_;
+                read_callback_data->contentLength = length;
+                read_callback_data->offset = 0;
+                read_callback_data->debug_flag = debug_flag_;
 
                 if (debug_flag_) {
                     msg.str( std::string() ); // Clear
                     msg << "Multirange:  Start range key \"" << object_key_ << "\", offset "
-                        << (long)rangeData.get_object_data.offset << ", len " 
-                        << (int)rangeData.get_object_data.contentLength;
+                        << (long)read_callback_data->offset << ", len " 
+                        << (int)read_callback_data->contentLength;
                     printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, 
                             msg.str().c_str());
                 }
@@ -1754,37 +1596,39 @@ namespace irods::experimental::io
                 print_bucket_context(bucket_context_);
                 S3_get_object( &bucket_context_, object_key_.c_str(), NULL, 
                         file_offset_,
-                        //rangeData.get_object_data.offset,
-                        rangeData.get_object_data.contentLength, 0, 
-                        &getObjectHandler, &rangeData );
+                        //read_callback_data->offset,
+                        read_callback_data->contentLength, 0, 
+                        &getObjectHandler, read_callback_data );
 
                 if (debug_flag_) {
                     unsigned long long usEnd = usNow();
-                    double bw = (rangeData.get_object_data.contentLength / (1024.0*1024.0)) /
+                    double bw = (read_callback_data->contentLength / (1024.0*1024.0)) /
                         ( (usEnd - usStart) / 1000000.0 );
                     msg << " -- END -- BW=" << bw << " MB/s";
                     printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, msg.str().c_str());
                 }
 
-                if (rangeData.status != S3StatusOK) s3_sleep( retry_wait_, 0 );
+                delete read_callback_data;
 
-            } while ((rangeData.status != S3StatusOK) && S3_status_is_retryable(rangeData.status) 
+                if (read_callback_data->status != S3StatusOK) s3_sleep( retry_wait_, 0 );
+
+            } while ((read_callback_data->status != S3StatusOK) && S3_status_is_retryable(read_callback_data->status) 
                     && (++retry_cnt < retry_count_limit_));
 
-            if (rangeData.status != S3StatusOK) {
+            if (read_callback_data->status != S3StatusOK) {
                 msg.str( std::string() ); // Clear
                 msg << " - Error getting the S3 object: \"" << object_key_ << " ";
-                if (rangeData.status >= 0) {
-                    msg << " - \"" << S3_get_status_name( rangeData.status ) << "\"";
+                if (read_callback_data->status >= 0) {
+                    msg << " - \"" << S3_get_status_name( read_callback_data->status ) << "\"";
                 }
                 printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, msg.str().c_str());
             }
 
-            if (rangeData.status != S3StatusOK) {
+            if (read_callback_data->status != S3StatusOK) {
                 shared_data->last_error = S3_GET_ERROR;
             }
 
-        } // end s3_download_part_to_buffer_worker_routine
+        } // end s3_download_part_worker_routine
 
         // this function is called in the background in a separate thread
         void s3_upload_part_worker_routine() 
