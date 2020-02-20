@@ -39,14 +39,13 @@
 #include <boost/container/scoped_allocator.hpp>
 #include <boost/interprocess/sync/scoped_lock.hpp>
 #include <boost/algorithm/string.hpp>
+#include <boost/filesystem.hpp>
 
 
 namespace irods::experimental::io
 {
 
     time_t get_shared_memory_timeout();
-
-    namespace bi = boost::interprocess;
 
     class scoped_lock_test {
     public:
@@ -64,6 +63,8 @@ namespace irods::experimental::io
             , lock{nullptr}
             , object_identifier{_object_identifier}
         {
+            namespace bi = boost::interprocess;
+
             if (file != nullptr && function != nullptr) {
                 printf("%s:%d (%s) [[%d]] ---LOCK--- waiting for lock\n", file, line, function, object_identifier);
             }
@@ -89,76 +90,83 @@ namespace irods::experimental::io
     private:
 
         std::string mutex_name;
-        bi::named_mutex *named_mtx;
-        bi::scoped_lock<bi::named_mutex> *lock;
+        boost::interprocess::named_mutex *named_mtx;
+        boost::interprocess::scoped_lock<boost::interprocess::named_mutex> *lock;
         const char *file;
         int line;
         const char *function;
         int object_identifier;
     };
 
+    namespace s3_transport_interprocess_types {
 
-    typedef bi::managed_shared_memory::segment_manager           segment_manager_t;
-    typedef boost::container::scoped_allocator_adaptor<
-                    bi::allocator<void, segment_manager_t> >     void_allocator;
-    typedef bi::allocator<int, segment_manager_t>                int_allocator;
-    typedef bi::allocator<char, segment_manager_t>               char_allocator;
-    typedef bi::vector<int, int_allocator>                       shm_int_vector_t;
-    typedef bi::basic_string<char, std::char_traits<char>,
-            char_allocator>                                      shm_char_string_t;
-    typedef bi::allocator<shm_char_string_t, segment_manager_t>  char_string_allocator;
-    typedef bi::vector<shm_char_string_t, char_string_allocator> shm_string_vector_t;
+        namespace bi = boost::interprocess;
+
+        using segment_manager       = bi::managed_shared_memory::segment_manager;
+        using void_allocator        = boost::container::scoped_allocator_adaptor
+                                      <bi::allocator<void, segment_manager> >;
+        using int_allocator         = bi::allocator<int, segment_manager>;
+        using char_allocator        = bi::allocator<char, segment_manager>;
+        using shm_int_vector        = bi::vector<int, int_allocator>;
+        using shm_char_string       = bi::basic_string<char, std::char_traits<char>, char_allocator>;
+        using char_string_allocator = bi::allocator<shm_char_string, segment_manager>;
+        using shm_string_vector     = bi::vector<shm_char_string, char_string_allocator>;
+    }
+
 
     // data that needs to be shared among different processes
-    struct multipart_shared_data_t
+    struct multipart_shared_data
     {
-        multipart_shared_data_t(const void_allocator &allocator)
+
+        multipart_shared_data(const s3_transport_interprocess_types::void_allocator &allocator)
             : last_access_time{time(nullptr)}
             , file_open_cntr{0}
             , upload_id{allocator}
             , download_id{allocator}
             , etags{allocator}
             , last_error{0}
-            , cache_file_downloaded_flag{false}
+            , cache_file_download_started_flag{false}
+            , cache_file_download_completed_flag{false}
         {}
 
-        time_t                   last_access_time;             // timeout for shmem
-        int                      file_open_cntr;
-        shm_char_string_t        upload_id;
-        shm_char_string_t        download_id;
-        shm_string_vector_t      etags;
-        int                      last_error;
-        bool                     cache_file_downloaded_flag;
+        time_t                                                last_access_time;             // timeout for shmem
+        int                                                   file_open_cntr;
+        s3_transport_interprocess_types::shm_char_string      upload_id;
+        s3_transport_interprocess_types::shm_char_string      download_id;
+        s3_transport_interprocess_types::shm_string_vector    etags;
+        int                                                   last_error;  // TODO change name to indicate where error comes from
+        bool                                                  cache_file_download_started_flag;
+        bool                                                  cache_file_download_completed_flag;
     };
 
 
-    typedef bi::allocator<multipart_shared_data_t,
-            segment_manager_t>                                   multipart_shared_data_allocator;
-    typedef std::pair<const shm_char_string_t,
-            multipart_shared_data_t>   map_value_type;
-    /*typedef bi::allocator<map_value_type,
-            segment_manager_t>                                   map_value_type_allocator;
-    typedef bi::map<shm_char_string_t, multipart_shared_data_t,
-            std::less<shm_char_string_t>,
-            map_value_type_allocator>                            multipart_shared_data_t;*/
+    /*namespace s3_transport_interprocess_types {
 
-    multipart_shared_data_t *get_shared_data_with_timeout(const std::string& key, 
-                                                          void_allocator& alloc_inst,
-                                                          bi::managed_shared_memory& segment,
-                                                          time_t shared_memory_timeout) 
+        using multipart_shared_data_allocator = bi::allocator<multipart_shared_data, segment_manager>;
+        using map_value_type                  = std::pair<const shm_char_string, multipart_shared_data>;
+    }*/
+
+    /*typedef bi::allocator<map_value_type,
+            segment_manager>                                   map_value_type_allocator;
+    typedef bi::map<shm_char_string, multipart_shared_data,
+            std::less<shm_char_string>,
+            map_value_type_allocator>                            multipart_shared_data;*/
+
+    multipart_shared_data *get_shared_data_with_timeout(const std::string& key, 
+                                                        s3_transport_interprocess_types::void_allocator& alloc_inst, 
+                                                        boost::interprocess::managed_shared_memory& segment, 
+                                                        time_t shared_memory_timeout) 
     {
 
-        multipart_shared_data_t *shared_data = segment.find_or_construct<multipart_shared_data_t>
-                (key.c_str())(alloc_inst);
+        multipart_shared_data *shared_data = segment.find_or_construct<multipart_shared_data>(key.c_str())(alloc_inst);
 
         time_t now = time(0);
 
-printf("%s:%d (%s) SHMEM: [now=%ld][last_access_time=%ld][diff=%ld]\n", __FILE__, __LINE__, __FUNCTION__, 
-now, shared_data->last_access_time, now - shared_data->last_access_time);
         if (now - shared_data->last_access_time > shared_memory_timeout) {
             // the shmem has expired, delete and start over
-            segment.destroy<multipart_shared_data_t>(key.c_str());
-            shared_data = segment.find_or_construct<multipart_shared_data_t>
+            // TODO reset the fields rather than destroy it
+            segment.destroy<multipart_shared_data>(key.c_str());
+            shared_data = segment.find_or_construct<multipart_shared_data>
                 (key.c_str())(alloc_inst);
         } else {
             shared_data->last_access_time = now;
@@ -185,65 +193,163 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
 
 
 
-    struct upload_page_t {
+    struct upload_page {
        char   *buffer;
        size_t buffer_size;
        bool   terminate_flag;
     };
 
-    typedef struct s3Stat
+    struct s3_stat 
     {
         char       key[MAX_NAME_LEN];
         rodsLong_t size;
         time_t     lastModified;
-    } s3Stat_t;
+    };
 
-    typedef struct callback_data
+
+    struct callback_data_for_write
     {
+        // TODO change all to uchar8_t
         char              *original_bytes_ptr;  /* set to the current buffer, used so that it can be deleted */
         char              *bytes;               /* a pointer to the current offset in the buffer */
+
+        // TODO uint32_t
         size_t            buffer_size;
-        irods::experimental::circular_buffer<upload_page_t>
+
+        // TODO std::unique_ptr
+        irods::experimental::circular_buffer<upload_page>
                           *circular_buffer_ptr;
+
+        // TODO change to uint64_t
         rodsLong_t        contentLength;
         rodsLong_t        originalContentLength;
         size_t            bytes_written;
         S3Status          status;
         int               keyCount;
-        s3Stat_t          s3Stat;               /* should be a pointer if keyCount > 1 */
+        s3_stat           stat;               /* should be a pointer if keyCount > 1 */
+
+        // TODO rename pCtx
         S3BucketContext   *pCtx;                /* To enable more detailed error messages */
         bool              debug_flag;
         int               object_identifier;
-    } callback_data_t;
+    };
 
+    class s3_read_callback {
+
+        public:
+
+            virtual S3Status read_callback_operator(int libs3_buffer_size,
+                                                    const char *libs3_buffer) = 0;
+
+            long            offset;       /* For multiple upload */
+            rodsLong_t      contentLength;
+            rodsLong_t      originalContentLength;
+            S3Status        status;
+            int             keyCount;
+            s3_stat         stat;    /* should be a pointer if keyCount > 1 */
+            S3BucketContext *pCtx; /* To enable more detailed error messages */
+    };
+
+    class s3_read_callback_to_cache : public s3_read_callback {
+
+        public:
+
+            S3Status read_callback_operator(int libs3_buffer_size,
+                                            const char *libs3_buffer) 
+            {
+
+                // writing output to cache file
+
+                ssize_t wrote = pwrite(cache_fd, libs3_buffer, libs3_buffer_size, offset);
+                if (wrote>0) offset += wrote;
+
+                return ((wrote < (ssize_t) libs3_buffer_size) ?
+                        S3StatusAbortedByCallback : S3StatusOK);
+
+            }
+
+            int cache_fd;
+    };
+
+    class s3_read_callback_to_buffer : public s3_read_callback {
+
+        public:
+
+            S3Status read_callback_operator(int libs3_buffer_size,
+                                            const char *libs3_buffer) 
+            {
+                // writing to buffer
+
+                int bytes_to_write = //libs3_buffer_size; 
+                      offset + libs3_buffer_size > output_buffer_size 
+                    ? output_buffer_size - offset 
+                    : libs3_buffer_size;
+
+                memcpy(output_buffer + offset, libs3_buffer, bytes_to_write);
+
+                offset += bytes_to_write;
+
+                return ((bytes_to_write < (ssize_t) libs3_buffer_size) ?
+                        S3StatusAbortedByCallback : S3StatusOK);
+
+            }
+
+            char            *output_buffer;
+            size_t          output_buffer_size;
+
+    };
+        
     // callback data for reads
-    typedef struct callback_data_read
+    // TODO callback_data_for_read
+    // TODO two different structs *for_cache_read, *for_object_read
+    struct callback_data_for_read_to_cache
     {
-        // used when writing directly to buffer
-        char            *output_buffer;
-        size_t          output_buffer_size;
-
-        // used when writing to cache file
-        int             fd;
+        int             cache_fd;
 
         long            offset;       /* For multiple upload */
         rodsLong_t      contentLength;
         rodsLong_t      originalContentLength;
         S3Status        status;
         int             keyCount;
-        s3Stat_t        s3Stat;    /* should be a pointer if keyCount > 1 */
+
+        s3_stat         stat;    /* should be a pointer if keyCount > 1 */
 
         S3BucketContext *pCtx; /* To enable more detailed error messages */
-    } callback_data_read_t;
+    };
 
-    typedef struct multirange_data
+    struct callback_data_for_read_to_buffer
     {
-        int                   seq;
-        callback_data_read_t  get_object_data;
-        S3Status              status;
-        S3BucketContext       *pCtx; // To enable more detailed error messages
-        bool                  debug_flag;
-    } multirange_data_t;
+        char            *output_buffer;
+        size_t          output_buffer_size;
+
+        long            offset;       /* For multiple upload */
+        rodsLong_t      contentLength;
+        rodsLong_t      originalContentLength;
+        S3Status        status;
+        int             keyCount;
+
+        s3_stat         stat;    /* should be a pointer if keyCount > 1 */
+
+        S3BucketContext *pCtx; /* To enable more detailed error messages */
+    };
+
+    struct multirange_download_data_to_buffer
+    {
+        int                               seq;
+        callback_data_for_read_to_buffer  get_object_data;
+        S3Status                          status;
+        S3BucketContext                   *pCtx; // To enable more detailed error messages
+        bool                              debug_flag;
+    };
+
+    struct multirange_download_data_to_cache
+    {
+        int                              seq;
+        callback_data_for_read_to_cache  get_object_data;
+        S3Status                         status;
+        S3BucketContext                  *pCtx; // To enable more detailed error messages
+        bool                             debug_flag;
+    };
 
     const size_t S3_DEFAULT_RETRY_WAIT_SEC = 1;
     const size_t S3_DEFAULT_RETRY_COUNT = 1;
@@ -258,7 +364,7 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
     } // end usNow
 
 
-    typedef struct upload_manager
+    struct upload_manager
     {
         upload_manager()
             : pCtx{nullptr}
@@ -276,23 +382,23 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
         S3Status                 status;            /* status returned by libs3 */
         std::string              object_key;
         time_t                   shared_memory_timeout;
-    } upload_manager_t;
+    };
 
-    typedef struct multipart_data
+    struct multipart_data
     {
-        int              seq;                /* Sequence number, i.e. which part */
-        int              mode;               /* PUT or COPY */
-        S3BucketContext  *pSrcCtx;           /* Source bucket context, ignored in a PUT */
-        const char       *srcKey;            /* Source key, ignored in a PUT */
-        callback_data_t  put_object_data;    /* File being uploaded */
-        upload_manager_t *manager;           /* To update w/the MD5 returned */
-        S3Status         status;
-        bool             enable_md5;
-        bool             server_encrypt;
-        bool             debug_flag;
-        int              object_identifier;
-        time_t           shared_memory_timeout;
-    } multipart_data_t;
+        int                      seq;                /* Sequence number, i.e. which part */
+        int                      mode;               /* PUT or COPY */
+        S3BucketContext          *pSrcCtx;           /* Source bucket context, ignored in a PUT */
+        const char               *srcKey;            /* Source key, ignored in a PUT */
+        callback_data_for_write  put_object_data;    /* File being uploaded */
+        upload_manager           *manager;           /* To update w/the MD5 returned */
+        S3Status                 status;
+        bool                     enable_md5;
+        bool                     server_encrypt;
+        bool                     debug_flag;
+        int                      object_identifier;
+        time_t                   shared_memory_timeout;
+    };
 
     void StoreAndLogStatus (S3Status status,
                             const S3ErrorDetails *error,
@@ -330,19 +436,26 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
     S3Status mpuInitXmlCB (const char* upload_id,
                            void *callbackData )
     {
-        upload_manager_t *manager = (upload_manager_t *)callbackData;
+        namespace bi = boost::interprocess;
+        namespace types = s3_transport_interprocess_types;
+
+        upload_manager *manager = (upload_manager *)callbackData;
 
         // upload upload_id in shared memory
         std::string& object_key = manager->object_key;
 
         std::string shared_memory_name =  object_key + "-shm";
+
+        // TODO figure out the right size.  get size with sizeof
         bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
 
-        void_allocator alloc_inst(segment.get_segment_manager());
+        types::void_allocator alloc_inst(segment.get_segment_manager());
 
         // no need to lock as this should already be locked
-        multipart_shared_data_t *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
+        // TODO Use a const or something for SharedData
+        multipart_shared_data *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
                 segment, manager->shared_memory_timeout);
+
         shared_data->upload_id = upload_id;
 
         return S3StatusOK;
@@ -358,7 +471,7 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
                             const S3ErrorDetails *error,
                             void *callbackData)
     {
-        upload_manager_t *data = (upload_manager_t*)callbackData;
+        upload_manager *data = (upload_manager*)callbackData;
         StoreAndLogStatus( status, error, __FUNCTION__, data->pCtx,
                 &(data->status), data->debug_flag );
     } // end mpuInitRespCompCB
@@ -369,7 +482,7 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
                         char *buffer,
                         void *callbackData)
     {
-        upload_manager_t *manager = (upload_manager_t *)callbackData;
+        upload_manager *manager = (upload_manager *)callbackData;
         long ret = 0;
         if (manager->remaining) {
             int toRead = ((manager->remaining > bufferSize) ?
@@ -393,52 +506,64 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
                               const S3ErrorDetails *error,
                               void *callbackData)
     {
-        upload_manager_t *data = (upload_manager_t*)callbackData;
+        upload_manager *data = (upload_manager*)callbackData;
         StoreAndLogStatus( status, error, __FUNCTION__, data->pCtx,
                 &(data->status), data->debug_flag );
         // Don't change the global error, we may want to retry at a higher level.
         // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
     } // end mpuCommitRespCompCB
 
-    S3Status getObjectDataCallback(int libs3_buffer_size,
-                                   const char *libs3_buffer,
-                                   void *callbackData)
+    S3Status getObjectDataCallbackToBuffer(int libs3_buffer_size,
+                                           const char *libs3_buffer,
+                                           void *callbackData)
     {
-        callback_data_read_t *cb = (callback_data_read_t *)callbackData;
+        callback_data_for_read_to_buffer *cb = (callback_data_for_read_to_buffer*)callbackData;
 
-        if (cb->output_buffer == nullptr) {
+        // writing to buffer
 
-            // writing output to cache file
+        int bytes_to_write = //libs3_buffer_size; 
+              cb->offset + libs3_buffer_size > cb->output_buffer_size 
+            ? cb->output_buffer_size - cb->offset 
+            : libs3_buffer_size;
 
-            ssize_t wrote = pwrite(cb->fd, libs3_buffer, libs3_buffer_size, cb->offset);
-            if (wrote>0) cb->offset += wrote;
+        memcpy(cb->output_buffer + cb->offset, libs3_buffer, bytes_to_write);
 
-            return ((wrote < (ssize_t) libs3_buffer_size) ?
-                    S3StatusAbortedByCallback : S3StatusOK);
-        } else {
+        cb->offset += bytes_to_write;
 
-            // writing to buffer
-
-            int bytes_to_write = //libs3_buffer_size; 
-                  cb->offset + libs3_buffer_size > cb->output_buffer_size 
-                ? cb->output_buffer_size - cb->offset 
-                : libs3_buffer_size;
-
-            memcpy(cb->output_buffer + cb->offset, libs3_buffer, bytes_to_write);
-
-            cb->offset += bytes_to_write;
-
-            return ((bytes_to_write < (ssize_t) libs3_buffer_size) ?
-                    S3StatusAbortedByCallback : S3StatusOK);
-        }
+        return ((bytes_to_write < (ssize_t) libs3_buffer_size) ?
+                S3StatusAbortedByCallback : S3StatusOK);
     }
 
-    S3Status mrdRangeGetDataCB(int bufferSize,
-                               const char *buffer,
-                               void *callbackData)
+    S3Status getObjectDataCallbackToCache(int libs3_buffer_size,
+                                          const char *libs3_buffer,
+                                          void *callbackData)
     {
-        multirange_data_t *data = (multirange_data_t*)callbackData;
-        return getObjectDataCallback( bufferSize, buffer, &(data->get_object_data) );
+        callback_data_for_read_to_cache *cb = (callback_data_for_read_to_cache *)callbackData;
+
+        // writing output to cache file
+
+        ssize_t wrote = pwrite(cb->cache_fd, libs3_buffer, libs3_buffer_size, cb->offset);
+        if (wrote>0) cb->offset += wrote;
+
+        return ((wrote < (ssize_t) libs3_buffer_size) ?
+                S3StatusAbortedByCallback : S3StatusOK);
+    }
+
+    // TODO put all callbacks into a namespace that identifies the type
+    S3Status mrdRangeGetDataCBToBuffer(int bufferSize,
+                                       const char *buffer,
+                                       void *callbackData)
+    {
+        multirange_download_data_to_buffer *data = (multirange_download_data_to_buffer*)callbackData;
+        return getObjectDataCallbackToBuffer( bufferSize, buffer, &(data->get_object_data) );
+    }
+
+    S3Status mrdRangeGetDataCBToCache(int bufferSize,
+                                      const char *buffer,
+                                      void *callbackData)
+    {
+        multirange_download_data_to_cache *data = (multirange_download_data_to_cache*)callbackData;
+        return getObjectDataCallbackToCache( bufferSize, buffer, &(data->get_object_data) );
     }
 
     S3Status mrdRangeRespPropCB(const S3ResponseProperties *properties,
@@ -452,7 +577,7 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
                              const S3ErrorDetails *error,
                              void *callbackData)
     {
-        multirange_data_t *data = (multirange_data_t*)callbackData;
+        multirange_download_data_to_buffer *data = (multirange_download_data_to_buffer*)callbackData;
         StoreAndLogStatus( status, error, __FUNCTION__, data->pCtx, &(data->status), 
                 data->debug_flag );
         // Don't change the global error, we may want to retry at a higher level.
@@ -465,19 +590,19 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
     {
         // keep reading a bufferSize bytes from buffer.
         // if buffer is empty, get another from the circular_buffer
-        callback_data_t *data = (callback_data_t *) callbackData;
-        irods::experimental::circular_buffer<upload_page_t> *circular_buffer_ptr =
+        callback_data_for_write *data = (callback_data_for_write *) callbackData;
+        irods::experimental::circular_buffer<upload_page> *circular_buffer_ptr =
             data->circular_buffer_ptr;
 
         // if we've already written the expected number of bytes, just return 0 which will
         // trigger the completion
-        if (data->bytes_written == data->contentLength) {
+        if (data->bytes_written >= data->contentLength) {
             return 0;
         }
 
         // if we've exhausted our current buffer, read the next buffer from the circular_buffer
         while (0 == data->buffer_size) {
-            upload_page_t page;
+            upload_page page;
 
             // read the first page
             if (data->debug_flag) {
@@ -514,21 +639,24 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
                           void *callbackData)
     {
         return putObjectDataCallback( bufferSize, buffer,
-                                      &((multipart_data_t*)callbackData)->put_object_data );
+                                      &((multipart_data*)callbackData)->put_object_data );
     } // end mpuPartPutDataCB
 
     S3Status mpuPartRespPropCB (const S3ResponseProperties *properties,
                                 void *callbackData)
     {
         // update etag for this object
+        
+        namespace bi = boost::interprocess;
+        namespace types = s3_transport_interprocess_types;
 
-        multipart_data_t *data = (multipart_data_t *)callbackData;
+        multipart_data *data = (multipart_data *)callbackData;
 
         std::string& object_key = data->manager->object_key;
 
         std::string shared_memory_name =  object_key + "-shm";
         bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
-        void_allocator alloc_inst(segment.get_segment_manager());
+        types::void_allocator alloc_inst(segment.get_segment_manager());
 
         // lock for update
         std::string mtx_name = object_key + "-mtx";
@@ -537,7 +665,7 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
         //scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__, data->object_identifier);
 
         int object_identifier = data->object_identifier;
-        multipart_shared_data_t *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
+        multipart_shared_data *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
                 segment, data->shared_memory_timeout);
         int seq = data->seq;
         const char *etag = properties->eTag;
@@ -546,7 +674,7 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
         // to not require a resize but resize if necessary.
         if (seq > shared_data->etags.size()) {
             try {
-                shared_data->etags.resize(seq, shm_char_string_t("", alloc_inst));
+                shared_data->etags.resize(seq, types::shm_char_string("", alloc_inst));
             } catch (std::bad_alloc& ba) {
                 return S3StatusOutOfMemory;
             }
@@ -565,7 +693,7 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
                             const S3ErrorDetails *error,
                             void *callbackData)
     {
-        multipart_data_t *data = (multipart_data_t *)callbackData;
+        multipart_data *data = (multipart_data *)callbackData;
         StoreAndLogStatus( status, error, __FUNCTION__, data->put_object_data.pCtx,
                 &(data->status), data->debug_flag);
 
@@ -659,6 +787,7 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
                               const std::string& _s3_signature_version_str = "v4",
                               const std::string& _s3_protocol_str = "http",
                               const std::string& _s3_sts_date_str = "amz",
+                              const std::string& _cache_directory = "/tmp",
                               bool _debug_flag = false,
                               int _object_identifier = 0  // just for debug purposes
                               )
@@ -676,8 +805,9 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
             , shared_memory_timeout_{_shared_memory_timeout}
             , enable_md5_flag_{_enable_md5_flag}
             , server_encrypt_flag_{_server_encrypt_flag}
-            , cache_fd_{0}
+            , cache_directory_{_cache_directory}
             , debug_flag_{_debug_flag}
+            , cache_fd_{0}
             , fd_{uninitialized_file_descriptor}
             , fd_info_{}
             , call_s3_upload_part_flag_{true}
@@ -793,6 +923,9 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
         bool close(const on_close_success* _on_close_success = nullptr) override
         {
 
+            namespace bi = boost::interprocess;
+            namespace types = s3_transport_interprocess_types;
+
             if (!is_open()) {
                 return false;
             }
@@ -803,14 +936,13 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
             std::string shared_memory_name =  object_key_ + "-shm";
             bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
 
-            void_allocator alloc_inst(segment.get_segment_manager());
+            types::void_allocator alloc_inst(segment.get_segment_manager());
             int open_flags = populate_open_mode_flags();
 
             // if it is a full multpart upload, wait for the upload to complete
             if ( multipart_flag_ && (O_CREAT | O_WRONLY | O_TRUNC) == open_flags ) {
 
                 // This was a full multipart upload w/o cache.
-
 
                 if (debug_flag_) {
                     printf("%s:%d (%s) [[%d]] wait for join of upload thread\n", 
@@ -828,19 +960,66 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
                             __FILE__, __LINE__, __FUNCTION__, object_identifier_);
                 }
             }
-   
+
             // read the open_count
             std::string mtx_name = object_key_ + "-mtx";
             bi::named_mutex named_mtx{bi::open_or_create, mtx_name.c_str()};
             bi::scoped_lock<bi::named_mutex> lock(named_mtx);
             //scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__, object_identifier_);
             
-            multipart_shared_data_t *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
+            multipart_shared_data *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
                     segment, shared_memory_timeout_);
             int file_open_cntr = --(shared_data->file_open_cntr);
+
             if (file_open_cntr == 0) {
 
-                if (multipart_flag_ && (O_CREAT | O_WRONLY | O_TRUNC) == open_flags) {
+                if (use_cache_) {
+
+                    namespace bf = boost::filesystem;
+
+                    // Flush the cache file to S3.
+
+                    bf::path cache_file =  bf::path(cache_directory_) / bf::path(object_key_ + "-cache");
+
+                    // if we don't unlock here, the threads will try to obtain the same
+                    // lock during download so we must temporarily unlock
+                    lock.unlock();
+
+                    // go ahead and upload the object 
+                    cache_fd_ = open(cache_file.string().c_str(), O_RDONLY);
+                    size_t cache_file_size = lseek(cache_fd_, 0, SEEK_END); 
+
+                    size_t part_size = cache_file_size / number_of_transfer_threads_;
+
+                    unsigned long long usStart = usNow(); 
+                    std::list<std::thread*> threads;
+                    for (int thr_id=0; thr_id < number_of_transfer_threads_; thr_id++) {
+
+                        size_t buffer_size;
+                        if (thr_id == number_of_transfer_threads_ - 1) {
+                            buffer_size = part_size + (object_size_ - part_size * number_of_transfer_threads_);
+                        } else {
+                            buffer_size = part_size;
+                        }
+
+                        // TODO
+                        //std::thread *thisThread = new std::thread(&s3_transport::s3_upload_part_worker_routine, 
+                        //        this, nullptr, buffer_size);
+                        //threads.push_back(thisThread);
+
+                    }
+
+                    // Wait for threads to finish
+                    while (!threads.empty()) {
+                        std::thread *thisThread = threads.front();
+                        thisThread->join();
+                        delete thisThread;
+                        threads.pop_front();
+                    }
+
+                    lock.lock();
+
+                } else if (multipart_flag_ && (O_CREAT | O_WRONLY | O_TRUNC) == open_flags) {
                     if (0 > complete_multipart_upload()) {
                         remove_shared_memory();
                         return false;
@@ -868,7 +1047,7 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
                                 std::streamsize _buffer_size) override
         {
             // just get what is asked for
-            s3_download_part_worker_routine(_buffer, _buffer_size);
+            s3_download_part_to_buffer_worker_routine(_buffer, _buffer_size);
             return _buffer_size;
         }
 
@@ -976,6 +1155,7 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
 
         void remove_shared_memory() 
         {
+            namespace bi = boost::interprocess;
 
             std::string shared_memory_name =  object_key_ + "-shm";
             std::string mtx_name = object_key_ + "-mtx";
@@ -1048,6 +1228,8 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
                        std::ios_base::openmode _mode,
                        Function _func)
         {
+            namespace bi = boost::interprocess;
+            namespace types = s3_transport_interprocess_types;
 
             if (debug_flag_) {
                 printf("%s:%d (%s) [[%d]] [_mode & in = %d][_mode & out = %d][_mode & trunc = %d][_mode & app = %d]\n",
@@ -1091,7 +1273,7 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
             std::string shared_memory_name =  object_key_ + "-shm";
             bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
 
-            void_allocator alloc_inst(segment.get_segment_manager());
+            types::void_allocator alloc_inst(segment.get_segment_manager());
 
             // lock shared data for updates
             std::string mtx_name = object_key_ + "-mtx";
@@ -1099,7 +1281,7 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
             bi::scoped_lock<bi::named_mutex> lock(named_mtx);
             //scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__, object_identifier_);
 
-            multipart_shared_data_t *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
+            multipart_shared_data *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
                     segment, shared_memory_timeout_);
 
             ++(shared_data->file_open_cntr);
@@ -1119,57 +1301,79 @@ now, shared_data->last_access_time, now - shared_data->last_access_time);
                     return false;
                 }
 
-                ++s3_initialized_counter_;
             }
+            ++s3_initialized_counter_;
                 
-            std::string cache_file =  "/tmp" + object_key_ + "-cache";
-
             if (object_exists && download_to_cache_) {
 
-                std::string cache_file =  "/tmp" + object_key_ + "-cache";
+                namespace bf = boost::filesystem;
 
-                if (!shared_data->cache_file_downloaded_flag) {
+                // TODO not yet tested 
+
+                // TODO not sure how boost::filesystem will handle this if object_key_ has a directory structure in it. test.
+                bf::path cache_file =  bf::path(cache_directory_) / bf::path(object_key_ + "-cache");
+
+                if (!shared_data->cache_file_download_started_flag) {
+
+                    shared_data->cache_file_download_started_flag = true;
+
+                    // if we don't unlock here, the threads will try to obtain the same
+                    // lock during download so we must temporarily unlock
+                    lock.unlock();
 
                     // go ahead and download the object to cache file
-                    cache_fd_ = open(cache_file.c_str(), O_RDONLY);
+                    cache_fd_ = open(cache_file.string().c_str(), O_WRONLY);
 
                     size_t part_size = object_size_ / number_of_transfer_threads_;
 
-                    unsigned long long usStart = usNow(); std::list<std::thread*> threads;
+                    unsigned long long usStart = usNow(); 
+                    std::list<std::thread*> threads;
                     for (int thr_id=0; thr_id < number_of_transfer_threads_; thr_id++) {
- 
-                        // TODO not complete and not tested.  
-                        // we still have a lock here so if any of the threads do a lock
-                        // we will have a deadlock
 
-                        size_t buffer_size;
+                        size_t this_part_size;
                         if (thr_id == number_of_transfer_threads_ - 1) {
-                            buffer_size = part_size + (object_size_ - part_size * number_of_transfer_threads_);
+                            this_part_size = part_size + (object_size_ - part_size * number_of_transfer_threads_);
                         } else {
-                            buffer_size = part_size;
+                            this_part_size = part_size;
                         }
 
-                        std::thread *thisThread = new std::thread(&s3_transport::s3_download_part_worker_routine, 
-                                this, nullptr, buffer_size);
-                        threads.push_back(thisThread);
+                        std::thread *this_thread= new std::thread(&s3_transport::s3_download_part_to_cache_worker_routine, 
+                                this, this_part_size);
+                        threads.push_back(this_thread);
 
                     }
 
                     // Wait for threads to finish
                     while (!threads.empty()) {
-                        std::thread *thisThread = threads.front();
-                        thisThread->join();
-                        delete thisThread;
+                        std::thread *this_thread= threads.front();
+                        this_thread->join();
+                        delete this_thread;
                         threads.pop_front();
                     }
-                    shared_data->cache_file_downloaded_flag = true;
+
+                    lock.lock();
+
+                    shared_data->cache_file_download_completed_flag = true;
+
                 }
+
+                // download has started so we must wait until it completes before continuing
+                // TODO figure out a better way to do this than a busy wait
+                //      can't use std::condition_variable because of the multiprocess case
+                //      get it working and then fix it
+                while (!(shared_data->cache_file_download_completed_flag)) {
+                    
+                    // unlock so others can continue
+                    lock.unlock();
+
+                    sleep(1);
+
+                    lock.lock();
+                }
+
             }
 
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
             if ( open_flags == (O_CREAT | O_WRONLY | O_TRUNC) ) {
-
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
 
                 // this is a full file upload - do not use cache
 
@@ -1178,7 +1382,6 @@ printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifie
                     // first one in initiates the multipart (everyone has same lock)
                     if (shared_data->last_error >= 0 && shared_data->file_open_cntr == 1) {
 
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
                         // send initiate message to S3
                         int ret = initiate_multipart_upload();
 
@@ -1223,6 +1426,8 @@ printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifie
 
         int initiate_multipart_upload()
         {
+            namespace bi = boost::interprocess;
+            namespace types = s3_transport_interprocess_types;
 
             int cache_fd = -1;
             int err_status = 0;
@@ -1231,68 +1436,54 @@ printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifie
             put_props_.useServerSideEncryption = server_encrypt_flag_;
             std::stringstream msg;
 
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
             put_props_.md5 = nullptr;
             //if ( enable_md5 )
             //    putProps.md5 = s3CalcMD5( cache_fd, 0, object_size, resource_name() );
             put_props_.expires = -1;
 
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
             upload_manager_.remaining = 0;
             upload_manager_.offset  = 0;
             upload_manager_.xml = "";
 
             msg.str( std::string() ); // Clear
 
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
             int partContentLength = 0;
 
-            callback_data_t data;
+            callback_data_for_write data;
             memset(&data, 0, sizeof(data));
             data.contentLength = data.originalContentLength = object_size_;
             data.debug_flag = debug_flag_;
             data.object_identifier = object_identifier_;
 
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
             // read shared memory entry for this key (shmem already locked here)
             std::string shared_memory_name =  object_key_ + "-shm";
             bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
 
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
-            void_allocator alloc_inst(segment.get_segment_manager());
-            multipart_shared_data_t *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
+            types::void_allocator alloc_inst(segment.get_segment_manager());
+            multipart_shared_data *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
                     segment, shared_memory_timeout_);
 
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
             /*try {
-                shared_data->etags.resize(number_of_transfer_threads_, shm_char_string_t("", alloc_inst));
+                shared_data->etags.resize(number_of_transfer_threads_, shm_char_string("", alloc_inst));
             } catch (std::bad_alloc& ba) {
                 return SYS_MALLOC_ERR;   // not really malloc but close enough
             }*/
 
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
             retry_cnt = 0;
-            // These expect a upload_manager_t* as cbdata
+            // These expect a upload_manager* as cbdata
             S3MultipartInitialHandler mpuInitialHandler
                 = { {mpuInitRespPropCB, mpuInitRespCompCB }, mpuInitXmlCB };
 
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
             do {
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
                 upload_manager_.pCtx = &bucket_context_;
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
                 print_bucket_context(bucket_context_);
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
                 if (debug_flag_) {
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
                     printf("%s:%d (%s) [[%d]] call S3_initiate_multipart [object_key=%s]\n",
                             __FILE__, __LINE__, __FUNCTION__, object_identifier_, object_key_.c_str());
                 }
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
                 S3_initiate_multipart(&bucket_context_, object_key_.c_str(),
                         &put_props_, &mpuInitialHandler, nullptr, &upload_manager_);
 
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
                 if (upload_manager_.status != S3StatusOK) s3_sleep( retry_wait_, 0 );
             } while ( (upload_manager_.status != S3StatusOK)
                     && S3_status_is_retryable(upload_manager_.status)
@@ -1315,12 +1506,15 @@ printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifie
 
         void mpuCancel()
         {
+            namespace bi = boost::interprocess;
+            namespace types = s3_transport_interprocess_types;
+
             // read upload_id from shmem
             std::string shared_memory_name =  object_key_ + "-shm";
             bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
 
-            void_allocator alloc_inst(segment.get_segment_manager());
-            multipart_shared_data_t *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
+            types::void_allocator alloc_inst(segment.get_segment_manager());
+            multipart_shared_data *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
                     segment, shared_memory_timeout_);
             std::string upload_id = shared_data->upload_id.c_str();
 
@@ -1356,6 +1550,8 @@ printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifie
 
         int complete_multipart_upload()
         {
+            namespace bi = boost::interprocess;
+            namespace types = s3_transport_interprocess_types;
 
             int result;
             std::stringstream msg;
@@ -1367,8 +1563,8 @@ printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifie
             std::string shared_memory_name =  object_key_ + "-shm";
             bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
 
-            void_allocator alloc_inst(segment.get_segment_manager());
-            multipart_shared_data_t *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
+            types::void_allocator alloc_inst(segment.get_segment_manager());
+            multipart_shared_data *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
                     segment, shared_memory_timeout_);
             std::string upload_id = shared_data->upload_id.c_str();
 
@@ -1440,36 +1636,106 @@ printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifie
             return result;
         } // end complete_multipart_upload
 
-        // this function is called in the background in a separate thread
-        void s3_download_part_worker_routine(char *buffer, size_t length)
+        void s3_download_part_to_cache_worker_routine(size_t length)
         {
+            namespace bi = boost::interprocess;
+            namespace types = s3_transport_interprocess_types;
 
             // read upload_id from shmem
             std::string shared_memory_name =  object_key_ + "-shm";
             bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
 
-            void_allocator alloc_inst(segment.get_segment_manager());
-            multipart_shared_data_t *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
+            types::void_allocator alloc_inst(segment.get_segment_manager());
+            multipart_shared_data *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
                     segment, shared_memory_timeout_);
             std::string download_id = shared_data->download_id.c_str();
 
             std::stringstream msg;
 
             size_t retry_cnt = 0;
-            multirange_data_t rangeData;
+            multirange_download_data_to_cache rangeData;
             do {
 
-                S3GetObjectHandler getObjectHandler = { {mrdRangeRespPropCB, mrdRangeRespCompCB }, mrdRangeGetDataCB};
-
-                // we are writing to cache file
+                S3GetObjectHandler getObjectHandler = { {mrdRangeRespPropCB, mrdRangeRespCompCB }, mrdRangeGetDataCBToCache};
 
                 rangeData.pCtx = &bucket_context_;
-
-                // if writing to cache file, the output_buffer will be nullptr
-                // if writing directly to output_buffer, the fd will not be used
                 rangeData.get_object_data.contentLength = length;
                 rangeData.get_object_data.offset = 0;
-                rangeData.get_object_data.fd = cache_fd_;
+                rangeData.get_object_data.cache_fd = cache_fd_;
+                rangeData.debug_flag = debug_flag_;
+
+
+                if (debug_flag_) {
+                    msg.str( std::string() ); // Clear
+                    msg << "Multirange:  Start range key \"" << object_key_ << "\", offset "
+                        << (long)rangeData.get_object_data.offset << ", len " 
+                        << (int)rangeData.get_object_data.contentLength;
+                    printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, 
+                            msg.str().c_str());
+                }
+
+                unsigned long long usStart = usNow();
+                print_bucket_context(bucket_context_);
+                S3_get_object( &bucket_context_, object_key_.c_str(), NULL, 
+                        file_offset_,
+                        //rangeData.get_object_data.offset,
+                        rangeData.get_object_data.contentLength, 0, 
+                        &getObjectHandler, &rangeData );
+
+                if (debug_flag_) {
+                    unsigned long long usEnd = usNow();
+                    double bw = (rangeData.get_object_data.contentLength / (1024.0*1024.0)) /
+                        ( (usEnd - usStart) / 1000000.0 );
+                    msg << " -- END -- BW=" << bw << " MB/s";
+                    printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, msg.str().c_str());
+                }
+
+                if (rangeData.status != S3StatusOK) s3_sleep( retry_wait_, 0 );
+
+            } while ((rangeData.status != S3StatusOK) && S3_status_is_retryable(rangeData.status) 
+                    && (++retry_cnt < retry_count_limit_));
+
+            if (rangeData.status != S3StatusOK) {
+                msg.str( std::string() ); // Clear
+                msg << " - Error getting the S3 object: \"" << object_key_ << " ";
+                if (rangeData.status >= 0) {
+                    msg << " - \"" << S3_get_status_name( rangeData.status ) << "\"";
+                }
+                printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, msg.str().c_str());
+            }
+
+            if (rangeData.status != S3StatusOK) {
+                shared_data->last_error = S3_GET_ERROR;
+            }
+
+        } // end s3_download_part_to_cache_worker_routine
+
+        // this function is called in the background in a separate thread
+        void s3_download_part_to_buffer_worker_routine(char *buffer, size_t length)
+        {
+            namespace bi = boost::interprocess;
+            namespace types = s3_transport_interprocess_types;
+
+            // read upload_id from shmem
+            std::string shared_memory_name =  object_key_ + "-shm";
+            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
+
+            types::void_allocator alloc_inst(segment.get_segment_manager());
+            multipart_shared_data *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
+                    segment, shared_memory_timeout_);
+            std::string download_id = shared_data->download_id.c_str();
+
+            std::stringstream msg;
+
+            size_t retry_cnt = 0;
+            multirange_download_data_to_buffer rangeData;
+            do {
+
+                S3GetObjectHandler getObjectHandler = { {mrdRangeRespPropCB, mrdRangeRespCompCB }, mrdRangeGetDataCBToBuffer};
+
+                rangeData.pCtx = &bucket_context_;
+                rangeData.get_object_data.contentLength = length;
+                rangeData.get_object_data.offset = 0;
                 rangeData.get_object_data.output_buffer = buffer;
                 rangeData.get_object_data.output_buffer_size = length;
                 rangeData.debug_flag = debug_flag_;
@@ -1518,56 +1784,47 @@ printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifie
                 shared_data->last_error = S3_GET_ERROR;
             }
 
-        } // end s3_download_part_worker_routine
+        } // end s3_download_part_to_buffer_worker_routine
 
         // this function is called in the background in a separate thread
-        void s3_upload_part_worker_routine() {
+        void s3_upload_part_worker_routine() 
+        {
+            namespace bi = boost::interprocess;
+            namespace types = s3_transport_interprocess_types;
 
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
             // read upload_id from shmem
             std::string shared_memory_name =  object_key_ + "-shm";
             bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 65536);
-            void_allocator alloc_inst(segment.get_segment_manager());
+            types::void_allocator alloc_inst(segment.get_segment_manager());
             std::string mtx_name = object_key_ + "-mtx";
-
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
 
             std::string upload_id;
             {
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
                 bi::named_mutex named_mtx{bi::open_or_create, mtx_name.c_str()};
                 bi::scoped_lock<bi::named_mutex> lock(named_mtx);
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
                 //scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__, object_identifier_);
-                multipart_shared_data_t *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
+                multipart_shared_data *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
                         segment, shared_memory_timeout_);
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
                 upload_id = shared_data->upload_id.c_str();
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
             }
 
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
             std::stringstream msg;
             S3PutObjectHandler putObjectHandler
                 = { {mpuPartRespPropCB, mpuPartRespCompCB }, &mpuPartPutDataCB };
 
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
-            multipart_data_t partData{};
-            upload_page_t page;
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
+            multipart_data partData{};
+            upload_page page;
 
             // read the first page
             if (debug_flag_) {
                 printf("%s:%d (%s) [[%d]] waiting to read\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
             }
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
             circular_buffer_.pop_front(page);
             if (debug_flag_) {
                 printf("%s:%d (%s) [[%d]] read page [buffer=%p][buffer_size=%zu][terminate_flag=%d]\n",
                         __FILE__, __LINE__, __FUNCTION__, object_identifier_, page.buffer, page.buffer_size,
                         page.terminate_flag);
             }
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
 
             size_t retry_cnt = 0;
 
@@ -1575,29 +1832,22 @@ printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifie
             // the last page might be larger so doing a little trick to handle that case (second term)
             int sequence = (file_offset_ / page.buffer_size) + (file_offset_ % page.buffer_size == 0 ? 0 : 1) + 1;
 
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
             // estimate the size and resize the etags vector
             int number_of_parts = object_size_ / page.buffer_size;
             number_of_parts = number_of_parts < sequence ? sequence : number_of_parts;
       
-printf("%s:%d (%s) [[%d]][page.buffer_size=%ld][object_size_=%ld][number_of_parts=%d]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, page.buffer_size, object_size_, number_of_parts);
             // resize the etags vector if necessary 
             {  
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
                 bi::named_mutex named_mtx{bi::open_or_create, mtx_name.c_str()};
                 bi::scoped_lock<bi::named_mutex> lock(named_mtx);
                 //scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__, object_identifier_);
 
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
-                multipart_shared_data_t *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
+                multipart_shared_data *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
                         segment, shared_memory_timeout_);
 
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
                 if (number_of_parts > shared_data->etags.size()) {
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
                     try {
-printf("%s:%d (%s) [[%d]] resize to %d\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, number_of_parts);
-                        shared_data->etags.resize(number_of_parts, shm_char_string_t("", alloc_inst));
+                        shared_data->etags.resize(number_of_parts, types::shm_char_string("", alloc_inst));
                     } catch (std::bad_alloc& ba) {
                         shared_data->last_error = SYS_MALLOC_ERR;
                     }
@@ -1673,7 +1923,7 @@ printf("%s:%d (%s) [[%d]] resize to %d\n", __FILE__, __LINE__, __FUNCTION__, obj
                 bi::named_mutex named_mtx{bi::open_or_create, mtx_name.c_str()};
                 bi::scoped_lock<bi::named_mutex> lock(named_mtx);
                 //scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__, object_identifier_);
-                multipart_shared_data_t *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
+                multipart_shared_data *shared_data = get_shared_data_with_timeout("SharedData", alloc_inst, 
                         segment, shared_memory_timeout_);
                 shared_data->last_error = S3_PUT_ERROR;
             }
@@ -1691,7 +1941,7 @@ printf("%s:%d (%s) [[%d]] resize to %d\n", __FILE__, __LINE__, __FUNCTION__, obj
         std::string               secret_access_key_;
         std::string               object_key_;
         S3BucketContext           bucket_context_;
-        upload_manager_t          upload_manager_;
+        upload_manager            upload_manager_;
         S3SignatureVersion        s3_signature_version_;
 
         time_t                    shared_memory_timeout_;
@@ -1699,12 +1949,12 @@ printf("%s:%d (%s) [[%d]] resize to %d\n", __FILE__, __LINE__, __FUNCTION__, obj
         bool                      server_encrypt_flag_;
 
         bool                      debug_flag_;
-        multipart_data_t          mpu_data_;
+        multipart_data            mpu_data_;
         bool                      call_s3_upload_part_flag_;
         bool                      call_s3_download_part_flag_;
         S3PutProperties           put_props_;
 
-        irods::experimental::circular_buffer<upload_page_t>
+        irods::experimental::circular_buffer<upload_page>
                                   circular_buffer_;
         std::thread               *begin_part_upload_thread_ptr_;
 
@@ -1712,6 +1962,7 @@ printf("%s:%d (%s) [[%d]] resize to %d\n", __FILE__, __LINE__, __FUNCTION__, obj
         size_t                    file_offset_;
         bool                      multipart_flag_;
         int                       cache_fd_;
+        std::string               cache_directory_;
 
         // operational modes based on input flags
         bool                      download_to_cache_;
@@ -1731,7 +1982,6 @@ printf("%s:%d (%s) [[%d]] resize to %d\n", __FILE__, __LINE__, __FUNCTION__, obj
 
     }; // s3_transport
 
-    using default_transport = s3_transport<char>;
 } // irods::experimental::io::s3_transport
 
 #endif // S3_TRANSPORT_HPP
