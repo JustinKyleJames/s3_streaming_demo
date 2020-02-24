@@ -15,11 +15,11 @@ using odstream          = irods::experimental::io::odstream;
 using idstream          = irods::experimental::io::idstream;
 using s3_transport      = irods::experimental::io::s3_transport<char>;
 
-void upload_part(int thread_number, const int thread_count, const size_t file_size, 
+void upload_part(int thread_number, const int thread_count, const uint32_t file_size, 
           const bool debug_flag, const char *hostname, const char *bucket_name, 
           const char *access_key, const char *secret_access_key, const char *filename);
 
-void download_part(int thread_number, const int thread_count, const size_t file_size, 
+void download_part(int thread_number, const int thread_count, const uint32_t file_size, 
           const bool debug_flag, const char *hostname, const char *bucket_name, 
           const char *access_key, const char *secret_access_key, const char *filename);
 
@@ -161,7 +161,7 @@ int main(int argc, char **argv)
     bucket_context.securityToken = nullptr;*/
 
     // determine file size 
-    size_t file_size;
+    uint32_t file_size;
     std::ifstream ifs;
     ifs.open(filename, std::ios::in | std::ios::binary | std::ios::ate); 
     if (!ifs.good()) {
@@ -297,7 +297,7 @@ int main(int argc, char **argv)
 
 void upload_part(int thread_number, 
                  const int thread_count, 
-                 const size_t file_size, 
+                 const uint32_t file_size, 
                  const bool debug_flag, 
                  const char *hostname, 
                  const char *bucket_name, 
@@ -368,7 +368,7 @@ void upload_part(int thread_number,
 
 void download_part(int thread_number, 
                    const int thread_count, 
-                   const size_t file_size, 
+                   const uint32_t file_size, 
                    const bool debug_flag, 
                    const char *hostname, 
                    const char *bucket_name, 
@@ -376,7 +376,7 @@ void download_part(int thread_number,
                    const char *secret_access_key, 
                    const char *filename)
 {
-    printf("%s(%d, %d, %lu, %d, %s, %s, %s, %s, %s)\n",  
+    printf("%s(%d, %d, %u, %d, %s, %s, %s, %s, %s)\n",  
           __FUNCTION__,
           thread_number, 
           thread_count, 
@@ -418,7 +418,7 @@ void download_part(int thread_number,
      * This part actually goes in S3 plugin. *
      *****************************************/
 
-    printf("tp1{%ld, %d, %d, %d, %s, %s, %s, %s, %d, %s, %s, %s, %d}\n", 
+    printf("tp1{%u, %d, %d, %d, %s, %s, %s, %s, %d, %s, %s, %s, %d}\n", 
             file_size, 100, 1, 1, hostname, bucket_name, access_key,
             secret_access_key, true, "V4", "http", "amz", true);
     s3_transport tp1{file_size, 100, 1, 1, hostname, bucket_name, access_key, 
