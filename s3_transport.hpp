@@ -124,7 +124,7 @@ namespace irods::experimental::io
             , upload_id{allocator}
             //, download_id{allocator}
             , etags{allocator}
-            , last_error{0}
+            , last_irods_error_code{0}
             , cache_file_download_started_flag{false}
             , cache_file_download_completed_flag{false}
         {}
@@ -132,9 +132,8 @@ namespace irods::experimental::io
         time_t                                                last_access_time;             // timeout for shmem
         int                                                   file_open_cntr;
         s3_transport_interprocess_types::shm_char_string      upload_id;
-        //s3_transport_interprocess_types::shm_char_string      download_id;
         s3_transport_interprocess_types::shm_string_vector    etags;
-        int                                                   last_error;  // TODO change name to indicate where error comes from
+        int                                                   last_irods_error_code;
         bool                                                  cache_file_download_started_flag;
         bool                                                  cache_file_download_completed_flag;
     };
@@ -167,7 +166,7 @@ namespace irods::experimental::io
             shared_data->file_open_cntr = 0;
             shared_data->upload_id = "";
             shared_data->etags.clear();
-            shared_data->last_error = 0;
+            shared_data->last_irods_error_code = 0;
             shared_data->cache_file_download_started_flag = false;
             shared_data->cache_file_download_completed_flag = false;
 
@@ -246,9 +245,8 @@ namespace irods::experimental::io
     struct callback_data_for_write
     {
         // TODO change all to char8_t - this seems to be a c++20 thing
-        char              *original_bytes_ptr;  /* set to the current buffer, used so that it can be deleted */
-        char              *bytes;               /* a pointer to the current offset in the buffer */
-
+        char              *buffer; 
+        uint32_t          offset;
         uint32_t          buffer_size;
 
         // TODO std::unique_ptr
@@ -320,7 +318,7 @@ namespace irods::experimental::io
         public:
 
             S3Status read_data_callback(int libs3_buffer_size,
-                                            const char *libs3_buffer) 
+                                        const char *libs3_buffer) 
             {
 
                 // writing output to cache file
@@ -530,20 +528,18 @@ namespace irods::experimental::io
                         __FILE__, __LINE__, __FUNCTION__, data->object_identifier, page.buffer, page.buffer_size,
                         page.terminate_flag);
             }
-            delete[] data->original_bytes_ptr;
-            data->original_bytes_ptr = data->bytes = page.buffer;
+            delete[] data->buffer;
+            data->buffer = page.buffer;
             data->buffer_size = page.buffer_size;
         }
 
-        auto length = libs3_buffer_size > data->buffer_size
-            ? data->buffer_size
+        auto length = libs3_buffer_size > data->buffer_size - data->offset
+            ? data->buffer_size - data->offset
             : libs3_buffer_size;
 
-        memcpy(libs3_buffer, data->bytes, length);
+        memcpy(libs3_buffer, data->buffer + data->offset, length);
 
-        data->buffer_size -= length;
-        data->bytes += length;
-
+        data->offset += length;
         data->bytes_written += length;
 
         return length;
@@ -978,6 +974,7 @@ namespace irods::experimental::io
 
             // Put the buffer on the circular buffer.
             // We must copy the buffer because it will persist after send returns.
+            // TODO change to std::shared_ptr
             char *copied_buffer = new char[_buffer_size];
             memcpy(copied_buffer, _buffer, _buffer_size);
             circular_buffer_.push_back({copied_buffer, static_cast<uint32_t>(_buffer_size)});
@@ -1303,21 +1300,21 @@ namespace irods::experimental::io
                 if (multipart_flag_) {
 
                     // first one in initiates the multipart (everyone has same lock)
-                    if (shared_data->last_error >= 0 && shared_data->file_open_cntr == 1) {
+                    if (shared_data->last_irods_error_code >= 0 && shared_data->file_open_cntr == 1) {
 
                         // send initiate message to S3
                         int ret = initiate_multipart_upload();
 
                         if (ret < 0) {
-                            printf("%s:%d (%s) [[%d]] open returning false [last_error=%d]\n",
+                            printf("%s:%d (%s) [[%d]] open returning false [last_irods_error_code=%d]\n",
                                     __FILE__, __LINE__, __FUNCTION__, object_identifier_, ret);
-                            shared_data->last_error = ret;
+                            shared_data->last_irods_error_code = ret;
                             return false;
                         }
                     } else {
-                        if (shared_data->last_error < 0) {
-                            printf("%s:%d (%s) [[%d]] open returning false [last_error=%d]\n",
-                                    __FILE__, __LINE__, __FUNCTION__, object_identifier_, shared_data->last_error);
+                        if (shared_data->last_irods_error_code < 0) {
+                            printf("%s:%d (%s) [[%d]] open returning false [last_irods_error_code=%d]\n",
+                                    __FILE__, __LINE__, __FUNCTION__, object_identifier_, shared_data->last_irods_error_code);
                             return false;
                         }
                     }
@@ -1497,7 +1494,7 @@ namespace irods::experimental::io
                     segment, shared_memory_timeout_);
             std::string upload_id = shared_data->upload_id.c_str();
 
-            if (0 == shared_data->last_error) { // If someone aborted, don't complete...
+            if (0 == shared_data->last_irods_error_code) { // If someone aborted, don't complete...
                 if (debug_flag_) {
                     msg.str( std::string() ); // Clear
                     msg << "Multipart:  Completing key \"" << object_key_.c_str() << "\" Upload ID \""
@@ -1552,14 +1549,14 @@ namespace irods::experimental::io
                     return S3_PUT_ERROR;
                 }
             }
-            if (0 > shared_data->last_error && "" != shared_data->upload_id ) {
+            if (0 > shared_data->last_irods_error_code && "" != shared_data->upload_id ) {
 
                 // Someone aborted after we started, delete the partial object on S3
                 printf("Cancelling multipart upload\n");
                 mpuCancel();
 
                 // Return the error
-                result = shared_data->last_error;
+                result = shared_data->last_irods_error_code;
             }
 
             return result;
@@ -1585,7 +1582,7 @@ namespace irods::experimental::io
 
             int retry_cnt = 0;
 
-            s3_read_callback *read_callback_data;
+            std::shared_ptr<s3_read_callback> read_callback_data;
             do {
 
                 S3GetObjectHandler getObjectHandler = { 
@@ -1597,12 +1594,12 @@ namespace irods::experimental::io
                 };
 
                 if (buffer == nullptr) {
-                    read_callback_data = new s3_read_callback_to_cache();
-                    static_cast<s3_read_callback_to_cache*>(read_callback_data)->cache_fd = cache_fd_;
+                    read_callback_data = std::make_shared<s3_read_callback_to_cache>();
+                    static_cast<s3_read_callback_to_cache*>(read_callback_data.get())->cache_fd = cache_fd_;
                 } else {
-                    read_callback_data = new s3_read_callback_to_buffer();
-                    static_cast<s3_read_callback_to_buffer*>(read_callback_data)->output_buffer = buffer;
-                    static_cast<s3_read_callback_to_buffer*>(read_callback_data)->output_buffer_size = length;
+                    read_callback_data = std::make_shared<s3_read_callback_to_buffer>();
+                    static_cast<s3_read_callback_to_buffer*>(read_callback_data.get())->output_buffer = buffer;
+                    static_cast<s3_read_callback_to_buffer*>(read_callback_data.get())->output_buffer_size = length;
 
                 }
                 read_callback_data->pCtx = &bucket_context_;
@@ -1625,7 +1622,7 @@ namespace irods::experimental::io
                         file_offset_,
                         //read_callback_data->offset,
                         read_callback_data->contentLength, 0, 
-                        &getObjectHandler, read_callback_data );
+                        &getObjectHandler, read_callback_data.get() );
 
                 if (debug_flag_) {
                     unsigned long long usEnd = usNow();
@@ -1634,8 +1631,6 @@ namespace irods::experimental::io
                     msg << " -- END -- BW=" << bw << " MB/s";
                     printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, msg.str().c_str());
                 }
-
-                delete read_callback_data;
 
                 if (read_callback_data->status != S3StatusOK) s3_sleep( retry_wait_, 0 );
 
@@ -1652,7 +1647,7 @@ namespace irods::experimental::io
             }
 
             if (read_callback_data->status != S3StatusOK) {
-                shared_data->last_error = S3_GET_ERROR;
+                shared_data->last_irods_error_code = S3_GET_ERROR;
             }
 
         } // end s3_download_part_worker_routine
@@ -1724,7 +1719,7 @@ namespace irods::experimental::io
                     try {
                         shared_data->etags.resize(number_of_parts, types::shm_char_string("", alloc_inst));
                     } catch (std::bad_alloc& ba) {
-                        shared_data->last_error = SYS_MALLOC_ERR;
+                        shared_data->last_irods_error_code = SYS_MALLOC_ERR;
                     }
                 }
             }
@@ -1739,8 +1734,7 @@ namespace irods::experimental::io
                 partData.seq = sequence;
                 partData.shared_memory_timeout = shared_memory_timeout_;
                 partData.put_object_data.pCtx = &bucket_context_;
-                partData.put_object_data.original_bytes_ptr
-                    = partData.put_object_data.bytes = page.buffer;
+                partData.put_object_data.buffer = page.buffer;
                 partData.put_object_data.circular_buffer_ptr = &(s3_transport::circular_buffer_);
                 partData.put_object_data.buffer_size = partData.put_object_data.contentLength = page.buffer_size;
                 partData.put_object_data.object_identifier = object_identifier_;
@@ -1801,7 +1795,7 @@ namespace irods::experimental::io
                 multipart_shared_data *shared_data = get_shared_data_with_timeout(
                         s3_transport_constants::MULTIPART_SHARED_DATA_NAME, alloc_inst, 
                         segment, shared_memory_timeout_);
-                shared_data->last_error = S3_PUT_ERROR;
+                shared_data->last_irods_error_code = S3_PUT_ERROR;
             }
         }
 
@@ -1848,7 +1842,7 @@ namespace irods::experimental::io
         // just for debugging purposes
         int                       object_identifier_;
 
-        inline static int file_descriptor_counter_ = minimum_valid_file_descriptor;
+        inline static int         file_descriptor_counter_ = minimum_valid_file_descriptor;
 
         // this counter keeps track of whether this process has initialized
         // S3.  If we are in a multithreaded / single process environment the
