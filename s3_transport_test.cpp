@@ -311,8 +311,8 @@ void upload_part(int thread_number,
             __FILE__, __LINE__, __FUNCTION__, thread_number, thread_number);
 
     // thread in irods only deal with sequential bytes.  figure out what bytes this thread deals with
-    size_t start = thread_number * (file_size / thread_count);
-    size_t end = 0;
+    uint32_t start = thread_number * (file_size / thread_count);
+    uint32_t end = 0;
     if (thread_number == thread_count - 1) {
         end = file_size;
     } else {
@@ -330,7 +330,7 @@ void upload_part(int thread_number,
     ifs.seekg(start, std::ios::beg);
 
 
-    size_t current_buffer_size = end - start;
+    uint32_t current_buffer_size = end - start;
     char *current_buffer = new char[current_buffer_size];
     ifs.read((char*)(current_buffer), current_buffer_size);
 
@@ -342,12 +342,15 @@ void upload_part(int thread_number,
      *****************************************/
 
     // TODO look at encapsulate the args in a struct
-    s3_transport tp1{file_size, 100, 1, 1, hostname, bucket_name, access_key, 
+    s3_transport tp1{file_size, 100, current_buffer_size, 1, 1, hostname, bucket_name, access_key, 
         secret_access_key, true, 60, false, false, "V4", "http", "amz", "/tmp", true, thread_number};
 
     odstream ds1{tp1, filename};
     ds1.seekp(start);
-    ds1.write(current_buffer, current_buffer_size);
+
+    // doing two writes here just to test that that works
+    ds1.write(current_buffer, 100); 
+    ds1.write(current_buffer+100, current_buffer_size-100);
 
     printf("WRITE DONE FOR %d\n", thread_number);
 
@@ -421,7 +424,7 @@ void download_part(int thread_number,
     printf("tp1{%u, %d, %d, %d, %s, %s, %s, %s, %d, %s, %s, %s, %d}\n", 
             file_size, 100, 1, 1, hostname, bucket_name, access_key,
             secret_access_key, true, "V4", "http", "amz", true);
-    s3_transport tp1{file_size, 100, 1, 1, hostname, bucket_name, access_key, 
+    s3_transport tp1{file_size, 100, 0, 1, 1, hostname, bucket_name, access_key, 
         secret_access_key, true, 60, false, false, "V4", "http", "amz", "/tmp", true, thread_number};
 
     idstream ds1{tp1, filename};
