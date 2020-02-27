@@ -11,9 +11,10 @@
 
 const long transfer_buffer_size_for_parallel_transfer_in_megabytes = 4;
 
-using odstream          = irods::experimental::io::odstream;
-using idstream          = irods::experimental::io::idstream;
-using s3_transport      = irods::experimental::io::s3_transport<char>;
+using odstream            = irods::experimental::io::odstream;
+using idstream            = irods::experimental::io::idstream;
+using s3_transport        = irods::experimental::io::s3_transport<char>;
+using s3_transport_config = irods::experimental::io::s3_transport_config;
 
 void upload_part(int thread_number, const int thread_count, const uint32_t file_size, 
           const bool debug_flag, const char *hostname, const char *bucket_name, 
@@ -341,10 +342,18 @@ void upload_part(int thread_number,
      * This part actually goes in S3 plugin. *
      *****************************************/
 
-    // TODO look at encapsulate the args in a struct
-    s3_transport tp1{file_size, 100, current_buffer_size, 1, 1, hostname, bucket_name, access_key, 
-        secret_access_key, true, 60, false, false, "V4", "http", "amz", "/tmp", true, thread_number};
+    s3_transport_config s3_config;
+    s3_config.object_size = file_size;
+    s3_config.number_of_transfer_threads = 20;
+    s3_config.part_size = current_buffer_size;
+    s3_config.bucket_name = bucket_name;
+    s3_config.access_key = access_key;
+    s3_config.secret_access_key = secret_access_key;
+    s3_config.object_identifier = thread_number;
+    s3_config.debug_flag = debug_flag;
 
+    // TODO look at encapsulate the args in a struct
+    s3_transport tp1{s3_config};
     odstream ds1{tp1, filename};
     ds1.seekp(start);
 
@@ -424,8 +433,18 @@ void download_part(int thread_number,
     printf("tp1{%u, %d, %d, %d, %s, %s, %s, %s, %d, %s, %s, %s, %d}\n", 
             file_size, 100, 1, 1, hostname, bucket_name, access_key,
             secret_access_key, true, "V4", "http", "amz", true);
-    s3_transport tp1{file_size, 100, 0, 1, 1, hostname, bucket_name, access_key, 
-        secret_access_key, true, 60, false, false, "V4", "http", "amz", "/tmp", true, thread_number};
+
+    s3_transport_config s3_config;
+    s3_config.object_size = file_size;
+    s3_config.number_of_transfer_threads = 20;
+    s3_config.part_size = 0;
+    s3_config.bucket_name = bucket_name;
+    s3_config.access_key = access_key;
+    s3_config.secret_access_key = secret_access_key;
+    s3_config.object_identifier = thread_number;
+    s3_config.debug_flag = debug_flag;
+
+    s3_transport tp1{s3_config};
 
     idstream ds1{tp1, filename};
     ds1.seekg(start);

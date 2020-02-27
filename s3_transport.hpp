@@ -45,7 +45,7 @@
 namespace irods::experimental::io
 {
 
-    time_t get_shared_memory_timeout();
+    time_t get_shared_memory_timeout_seconds();
 
     class scoped_lock_test 
     {
@@ -157,7 +157,7 @@ namespace irods::experimental::io
     multipart_shared_data *get_shared_data_with_timeout(const std::string& key, 
                                                         s3_transport_interprocess_types::void_allocator& alloc_inst, 
                                                         boost::interprocess::managed_shared_memory& segment, 
-                                                        time_t shared_memory_timeout) 
+                                                        time_t shared_memory_timeout_seconds) 
     {
 
         multipart_shared_data *shared_data = segment.find_or_construct<multipart_shared_data>
@@ -165,7 +165,7 @@ namespace irods::experimental::io
 
         time_t now = time(0);
 
-        if (now - shared_data->last_access_time > shared_memory_timeout) {
+        if (now - shared_data->last_access_time > shared_memory_timeout_seconds) {
 
             // the shmem has expired, reset the fields 
             shared_data->last_access_time = now;
@@ -429,7 +429,7 @@ namespace irods::experimental::io
         bool                     debug_flag;
         S3Status                 status;            /* status returned by libs3 */
         std::string              object_key;
-        time_t                   shared_memory_timeout;
+        time_t                   shared_memory_timeout_seconds;
     };
 
     struct multipart_data
@@ -451,7 +451,7 @@ namespace irods::experimental::io
         bool                                   server_encrypt;
         bool                                   debug_flag;
         int                                    object_identifier;
-        time_t                                 shared_memory_timeout;
+        time_t                                 shared_memory_timeout_seconds;
     };
 
     namespace s3_mpu_init_callback 
@@ -478,7 +478,7 @@ namespace irods::experimental::io
             // no need to lock as this should already be locked
             multipart_shared_data *shared_data = get_shared_data_with_timeout(
                     s3_transport_constants::MULTIPART_SHARED_DATA_NAME, alloc_inst, 
-                    segment, manager->shared_memory_timeout);
+                    segment, manager->shared_memory_timeout_seconds);
 
             shared_data->upload_id = upload_id;
 
@@ -633,7 +633,7 @@ namespace irods::experimental::io
             int object_identifier = data->object_identifier;
             multipart_shared_data *shared_data = get_shared_data_with_timeout(
                     s3_transport_constants::MULTIPART_SHARED_DATA_NAME, alloc_inst, 
-                    segment, data->shared_memory_timeout);
+                    segment, data->shared_memory_timeout_seconds);
             int seq = data->seq;
             const char *etag = properties->eTag;
 
@@ -716,6 +716,53 @@ namespace irods::experimental::io
         usleep( us );
     } // end s3_sleep
 
+    struct s3_transport_config 
+    {
+
+        s3_transport_config() 
+            : object_size{0}
+            , number_of_transfer_threads{1}
+            , part_size{1000}
+            , retry_count_limit{3}
+            , retry_wait_seconds{3}
+            , hostname{"s3.amazonaws.com"}
+            , bucket_name{""}
+            , access_key{""}
+            , secret_access_key{""}
+            , multipart_flag{true}
+            , shared_memory_timeout_seconds{900}
+            , enable_md5_flag{false}
+            , server_encrypt_flag{false}
+            , s3_signature_version_str{"v4"}
+            , s3_protocol_str{"http"}
+            , s3_sts_date_str{"amz"}
+            , cache_directory{"/tmp"}
+            , debug_flag{false}
+            , object_identifier{0}  // just for debug purposes
+        {}
+                
+        uint32_t     object_size;
+        int          number_of_transfer_threads; // only used when doing full file upload/download via cache
+                                                       // otherwise it is controlled by iRODS
+        uint32_t     part_size;                  // only used when doing a multipart upload 
+        int          retry_count_limit;
+        int          retry_wait_seconds;
+        std::string  hostname;
+        std::string  bucket_name;
+        std::string  access_key;
+        std::string  secret_access_key;
+        bool         multipart_flag;
+        time_t       shared_memory_timeout_seconds;
+        bool         enable_md5_flag;
+        bool         server_encrypt_flag;
+        std::string  s3_signature_version_str;
+        std::string  s3_protocol_str;
+        std::string  s3_sts_date_str;
+        std::string  cache_directory;
+        bool         debug_flag;
+        int          object_identifier;          // just for debug purposes
+    };
+
     template <typename CharT>
     class s3_transport : public transport<CharT>
     {
@@ -743,44 +790,24 @@ namespace irods::experimental::io
 
     public:
 
-        explicit s3_transport(uint32_t _object_size,
-                              int _number_of_transfer_threads,     // only used when doing full file upload/download via cache
-                                                                   // otherwise it is controlled by iRODS
-                              uint32_t _part_size,                 // only used when doing a multipart upload 
-                              int _retry_count_limit,
-                              int _retry_wait,
-                              const std::string& _hostname,
-                              const std::string& _bucket_name,
-                              const std::string& _access_key,
-                              const std::string& _secret_access_key,
-                              bool _multipart_flag,
-                              time_t _shared_memory_timeout,
-                              bool _enable_md5_flag = false,
-                              bool _server_encrypt_flag = false,
-                              const std::string& _s3_signature_version_str = "v4",
-                              const std::string& _s3_protocol_str = "http",
-                              const std::string& _s3_sts_date_str = "amz",
-                              const std::string& _cache_directory = "/tmp",
-                              bool _debug_flag = false,
-                              int _object_identifier = 0  // just for debug purposes
-                              )
+        explicit s3_transport(const s3_transport_config& _config)
 
             : transport<CharT>{}
-            , object_size_{_object_size}
-            , number_of_transfer_threads_{_number_of_transfer_threads}
-            , part_size_{_part_size}
-            , retry_count_limit_{_retry_count_limit}
-            , retry_wait_{_retry_wait}
-            , hostname_{_hostname}
-            , bucket_name_{_bucket_name}
-            , access_key_{_access_key}
-            , secret_access_key_{_secret_access_key}
-            , multipart_flag_{_multipart_flag}
-            , shared_memory_timeout_{_shared_memory_timeout}
-            , enable_md5_flag_{_enable_md5_flag}
-            , server_encrypt_flag_{_server_encrypt_flag}
-            , cache_directory_{_cache_directory}
-            , debug_flag_{_debug_flag}
+            , object_size_{_config.object_size}
+            , number_of_transfer_threads_{_config.number_of_transfer_threads}
+            , part_size_{_config.part_size}
+            , retry_count_limit_{_config.retry_count_limit}
+            , retry_wait_seconds_{_config.retry_wait_seconds}
+            , hostname_{_config.hostname}
+            , bucket_name_{_config.bucket_name}
+            , access_key_{_config.access_key}
+            , secret_access_key_{_config.secret_access_key}
+            , multipart_flag_{_config.multipart_flag}
+            , shared_memory_timeout_seconds_{_config.shared_memory_timeout_seconds}
+            , enable_md5_flag_{_config.enable_md5_flag}
+            , server_encrypt_flag_{_config.server_encrypt_flag}
+            , cache_directory_{_config.cache_directory}
+            , debug_flag_{_config.debug_flag}
             , cache_fd_{0}
             , fd_{uninitialized_file_descriptor}
             , fd_info_{}
@@ -793,7 +820,7 @@ namespace irods::experimental::io
             , download_to_cache_{false}
             , use_cache_{false}
             , object_must_exist_{false}
-            , object_identifier_{_object_identifier}
+            , object_identifier_{_config.object_identifier}
             , upload_manager_{bucket_context_}
             , mpu_data_{upload_manager_, bucket_context_, circular_buffer_}
         {
@@ -803,12 +830,12 @@ namespace irods::experimental::io
             mpu_data_.enable_md5 = enable_md5_flag_;
             mpu_data_.server_encrypt = server_encrypt_flag_;
             mpu_data_.object_identifier = object_identifier_;
-            mpu_data_.shared_memory_timeout = shared_memory_timeout_;
+            mpu_data_.shared_memory_timeout_seconds = shared_memory_timeout_seconds_;
 
             memset(&put_props_, 0, sizeof(put_props_));
 
             upload_manager_.debug_flag = debug_flag_;
-            upload_manager_.shared_memory_timeout = shared_memory_timeout_;
+            upload_manager_.shared_memory_timeout_seconds = shared_memory_timeout_seconds_;
             mpu_data_.debug_flag = debug_flag_;
 
             memset(&bucket_context_, 0, sizeof(bucket_context_));
@@ -817,22 +844,22 @@ namespace irods::experimental::io
             bucket_context_.accessKeyId     = access_key_.c_str();
             bucket_context_.secretAccessKey = secret_access_key_.c_str();
 
-            if (_s3_signature_version_str == "4"
-                    || boost::iequals(_s3_signature_version_str, "V4")) {
+            if (_config.s3_signature_version_str == "4"
+                    || boost::iequals(_config.s3_signature_version_str, "V4")) {
                 s3_signature_version_       = S3SignatureV4;
             } else {
                 s3_signature_version_       = S3SignatureV2;
             }
 
-            if (boost::iequals(_s3_protocol_str, "http")) {
+            if (boost::iequals(_config.s3_protocol_str, "http")) {
                 bucket_context_.protocol    = S3ProtocolHTTP;
             } else {
                 bucket_context_.protocol    = S3ProtocolHTTPS;
             }
 
-            if (boost::iequals(_s3_sts_date_str, "date")) {
+            if (boost::iequals(_config.s3_sts_date_str, "date")) {
                 bucket_context_.stsDate     = S3STSDateOnly;
-            } else if (boost::iequals(_s3_sts_date_str, "both")) {
+            } else if (boost::iequals(_config.s3_sts_date_str, "both")) {
                 bucket_context_.stsDate     = S3STSAmzAndDate;
             } else {
                 bucket_context_.stsDate     = S3STSAmzOnly;
@@ -945,7 +972,7 @@ namespace irods::experimental::io
             
             multipart_shared_data *shared_data = get_shared_data_with_timeout(
                     s3_transport_constants::MULTIPART_SHARED_DATA_NAME, alloc_inst, 
-                    segment, shared_memory_timeout_);
+                    segment, shared_memory_timeout_seconds_);
             int file_open_cntr = --(shared_data->file_open_cntr);
 
             if (file_open_cntr == 0) {
@@ -1263,7 +1290,7 @@ namespace irods::experimental::io
 
             multipart_shared_data *shared_data = get_shared_data_with_timeout(
                     s3_transport_constants::MULTIPART_SHARED_DATA_NAME, alloc_inst, 
-                    segment, shared_memory_timeout_);
+                    segment, shared_memory_timeout_seconds_);
 
             ++(shared_data->file_open_cntr);
 
@@ -1444,7 +1471,7 @@ namespace irods::experimental::io
             types::void_allocator alloc_inst(segment.get_segment_manager());
             multipart_shared_data *shared_data = get_shared_data_with_timeout(
                     s3_transport_constants::MULTIPART_SHARED_DATA_NAME, alloc_inst, 
-                    segment, shared_memory_timeout_);
+                    segment, shared_memory_timeout_seconds_);
 
             retry_cnt = 0;
 
@@ -1463,7 +1490,7 @@ namespace irods::experimental::io
                 S3_initiate_multipart(&bucket_context_, object_key_.c_str(),
                         &put_props_, &mpu_initial_handler, nullptr, &upload_manager_);
 
-                if (upload_manager_.status != S3StatusOK) s3_sleep( retry_wait_, 0 );
+                if (upload_manager_.status != S3StatusOK) s3_sleep( retry_wait_seconds_, 0 );
             } while ( (upload_manager_.status != S3StatusOK)
                     && S3_status_is_retryable(upload_manager_.status)
                     && ( ++retry_cnt < retry_count_limit_));
@@ -1496,7 +1523,7 @@ namespace irods::experimental::io
             types::void_allocator alloc_inst(segment.get_segment_manager());
             multipart_shared_data *shared_data = get_shared_data_with_timeout(
                     s3_transport_constants::MULTIPART_SHARED_DATA_NAME, alloc_inst, 
-                    segment, shared_memory_timeout_);
+                    segment, shared_memory_timeout_seconds_);
             std::string upload_id = shared_data->upload_id.c_str();
 
             S3AbortMultipartUploadHandler abort_handler
@@ -1549,7 +1576,7 @@ namespace irods::experimental::io
             types::void_allocator alloc_inst(segment.get_segment_manager());
             multipart_shared_data *shared_data = get_shared_data_with_timeout(
                     s3_transport_constants::MULTIPART_SHARED_DATA_NAME, alloc_inst, 
-                    segment, shared_memory_timeout_);
+                    segment, shared_memory_timeout_seconds_);
             std::string upload_id = shared_data->upload_id.c_str();
 
             if (0 == shared_data->last_irods_error_code) { // If someone aborted, don't complete...
@@ -1593,7 +1620,7 @@ namespace irods::experimental::io
                         printf("%s:%d (%s) [[%d]] [manager.status=%s]\n", __FILE__, __LINE__,
                                 __FUNCTION__, object_identifier_, S3_get_status_name(upload_manager_.status));
                     }
-                    if (upload_manager_.status != S3StatusOK) s3_sleep( retry_wait_, 0 );
+                    if (upload_manager_.status != S3StatusOK) s3_sleep( retry_wait_seconds_, 0 );
                 } while ((upload_manager_.status != S3StatusOK) &&
                         S3_status_is_retryable(upload_manager_.status) &&
                         ( ++retry_cnt < retry_count_limit_));
@@ -1635,7 +1662,7 @@ namespace irods::experimental::io
             types::void_allocator alloc_inst(segment.get_segment_manager());
             multipart_shared_data *shared_data = get_shared_data_with_timeout(
                     s3_transport_constants::MULTIPART_SHARED_DATA_NAME, alloc_inst, 
-                    segment, shared_memory_timeout_);
+                    segment, shared_memory_timeout_seconds_);
 
             std::stringstream msg;
 
@@ -1690,7 +1717,7 @@ namespace irods::experimental::io
                     printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, msg.str().c_str());
                 }
 
-                if (read_callback_data->status != S3StatusOK) s3_sleep( retry_wait_, 0 );
+                if (read_callback_data->status != S3StatusOK) s3_sleep( retry_wait_seconds_, 0 );
 
             } while ((read_callback_data->status != S3StatusOK) && S3_status_is_retryable(read_callback_data->status) 
                     && (++retry_cnt < retry_count_limit_));
@@ -1731,7 +1758,7 @@ namespace irods::experimental::io
                 //scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__, object_identifier_);
                 multipart_shared_data *shared_data = get_shared_data_with_timeout(
                         s3_transport_constants::MULTIPART_SHARED_DATA_NAME, alloc_inst, 
-                        segment, shared_memory_timeout_);
+                        segment, shared_memory_timeout_seconds_);
                 upload_id = shared_data->upload_id.c_str();
             }
 
@@ -1773,7 +1800,7 @@ namespace irods::experimental::io
 
                 multipart_shared_data *shared_data = get_shared_data_with_timeout(
                         s3_transport_constants::MULTIPART_SHARED_DATA_NAME, alloc_inst, 
-                        segment, shared_memory_timeout_);
+                        segment, shared_memory_timeout_seconds_);
 
                 if (number_of_parts > shared_data->etags.size()) {
                     try {
@@ -1796,7 +1823,7 @@ namespace irods::experimental::io
                 partData.object_identifier = mpu_data_.object_identifier;
                 partData.debug_flag = debug_flag_;
                 partData.seq = sequence;
-                partData.shared_memory_timeout = shared_memory_timeout_;
+                partData.shared_memory_timeout_seconds = shared_memory_timeout_seconds_;
                 partData.put_object_data.saved_bucket_context = bucket_context_;
                 partData.put_object_data.buffer = page.buffer;
                 partData.put_object_data.content_length = part_size_;
@@ -1847,7 +1874,7 @@ namespace irods::experimental::io
                     printf( "%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_,
                             msg.str().c_str() );
                 }
-                if (partData.status != S3StatusOK) s3_sleep( retry_wait_, 0 );
+                if (partData.status != S3StatusOK) s3_sleep( retry_wait_seconds_, 0 );
             } while ((partData.status != S3StatusOK) && S3_status_is_retryable(partData.status) &&
                     (++retry_cnt < retry_count_limit_));
 
@@ -1857,7 +1884,7 @@ namespace irods::experimental::io
                 //scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__, object_identifier_);
                 multipart_shared_data *shared_data = get_shared_data_with_timeout(
                         s3_transport_constants::MULTIPART_SHARED_DATA_NAME, alloc_inst, 
-                        segment, shared_memory_timeout_);
+                        segment, shared_memory_timeout_seconds_);
                 shared_data->last_irods_error_code = S3_PUT_ERROR;
             }
         }
@@ -1868,7 +1895,7 @@ namespace irods::experimental::io
         int                       number_of_transfer_threads_;
         uint32_t                  part_size_;
         int                       retry_count_limit_;
-        int                       retry_wait_;
+        int                       retry_wait_seconds_;
         std::string               hostname_;
         std::string               bucket_name_;
         std::string               access_key_;
@@ -1878,7 +1905,7 @@ namespace irods::experimental::io
         upload_manager            upload_manager_;
         S3SignatureVersion        s3_signature_version_;
 
-        time_t                    shared_memory_timeout_;
+        time_t                    shared_memory_timeout_seconds_;
         bool                      enable_md5_flag_;
         bool                      server_encrypt_flag_;
 
