@@ -13,25 +13,25 @@ const long transfer_buffer_size_for_parallel_transfer_in_megabytes = 4;
 
 using odstream            = irods::experimental::io::odstream;
 using idstream            = irods::experimental::io::idstream;
-using s3_transport        = irods::experimental::io::s3_transport<char>;
-using s3_transport_config = irods::experimental::io::s3_transport_config;
+using s3_transport        = irods::experimental::io::s3_transport::s3_transport<char>;
+using s3_transport_config = irods::experimental::io::s3_transport::config;
 
-void upload_part(int thread_number, const int thread_count, const uint32_t file_size, 
-          const bool debug_flag, const char *hostname, const char *bucket_name, 
+void upload_part(int thread_number, const int thread_count, const uint32_t file_size,
+          const bool debug_flag, const char *hostname, const char *bucket_name,
           const char *access_key, const char *secret_access_key, const char *filename);
 
-void download_part(int thread_number, const int thread_count, const uint32_t file_size, 
-          const bool debug_flag, const char *hostname, const char *bucket_name, 
+void download_part(int thread_number, const int thread_count, const uint32_t file_size,
+          const bool debug_flag, const char *hostname, const char *bucket_name,
           const char *access_key, const char *secret_access_key, const char *filename);
 
-void usage() 
+void usage()
 {
-    std::cerr << "Usage:  s3_transport_test <config_file> <upload_file> [upload|download|both]" 
+    std::cerr << "Usage:  s3_transport_test <config_file> <upload_file> [upload|download|both]"
               << std::endl;
 }
 
-int main(int argc, char **argv) 
-{ 
+int main(int argc, char **argv)
+{
 
     setbuf(stdout, nullptr);
 
@@ -39,9 +39,9 @@ int main(int argc, char **argv)
 
     std::cout << argc << std::endl;
 
-    if (argc < 3 || argc > 5) { 
+    if (argc < 3 || argc > 5) {
         usage();
-        return 1; 
+        return 1;
     }
 
     std::string mode = "both";
@@ -52,7 +52,7 @@ int main(int argc, char **argv)
             usage();
         }
     }
-         
+
     // Remove shared memory on construction and destruction
     //struct shm_remove
     //{
@@ -62,7 +62,7 @@ int main(int argc, char **argv)
 
     //Create shared memory
     //bi::managed_shared_memory segment(bi::create_only,"MySharedMemory", 65536);
-    
+
 
     std::string config_file = argv[1];
     std::string filename = argv[2];
@@ -78,7 +78,7 @@ int main(int argc, char **argv)
 
     if(!root)
     {
-        fprintf(stderr, "error: on line %d in %s: %s\n", 
+        fprintf(stderr, "error: on line %d in %s: %s\n",
                 error.line, config_file.c_str(), error.text);
         return 1;
     }
@@ -86,7 +86,7 @@ int main(int argc, char **argv)
     json_t *keyfile_json_object = json_object_get(root, "keyfile");
     if(!json_is_string(keyfile_json_object))
     {
-        fprintf(stderr, "error: keyfile missing or is not a string in %s\n", 
+        fprintf(stderr, "error: keyfile missing or is not a string in %s\n",
                 config_file.c_str());
         json_decref(root);
         return 1;
@@ -96,7 +96,7 @@ int main(int argc, char **argv)
     json_t *hostname_json_object = json_object_get(root, "hostname");
     if(!json_is_string(hostname_json_object))
     {
-        fprintf(stderr, "error: (%s): hostname missing or is not a string\n", 
+        fprintf(stderr, "error: (%s): hostname missing or is not a string\n",
                 config_file.c_str());
         json_decref(root);
         return 1;
@@ -106,7 +106,7 @@ int main(int argc, char **argv)
     json_t *bucket_name_json_object = json_object_get(root, "bucket_name");
     if(!json_is_string(bucket_name_json_object))
     {
-        fprintf(stderr, "error: (%s) bucket_name missing or is not a string\n", 
+        fprintf(stderr, "error: (%s) bucket_name missing or is not a string\n",
                 config_file.c_str());
         json_decref(root);
         return 1;
@@ -116,7 +116,7 @@ int main(int argc, char **argv)
     json_t *thread_count_json_object = json_object_get(root, "thread_count");
     if(!json_is_integer(thread_count_json_object))
     {
-        fprintf(stderr, "error: (%s) thread_count missing or is not an integer\n", 
+        fprintf(stderr, "error: (%s) thread_count missing or is not an integer\n",
                 config_file.c_str());
         json_decref(root);
         return 1;
@@ -152,19 +152,19 @@ int main(int argc, char **argv)
     }
 
     /*S3BucketContext bucket_context;
-    bucket_context.hostName = hostname.c_str(); 
-    bucket_context.bucketName = bucket_name.c_str(); 
+    bucket_context.hostName = hostname.c_str();
+    bucket_context.bucketName = bucket_name.c_str();
     bucket_context.protocol = S3ProtocolHTTP;
     bucket_context.stsDate = S3STSAmzOnly;
     bucket_context.uriStyle = S3UriStylePath;
-    bucket_context.accessKeyId = key_id.c_str(); 
+    bucket_context.accessKeyId = key_id.c_str();
     bucket_context.secretAccessKey = access_key.c_str();
     bucket_context.securityToken = nullptr;*/
 
-    // determine file size 
+    // determine file size
     uint32_t file_size;
     std::ifstream ifs;
-    ifs.open(filename, std::ios::in | std::ios::binary | std::ios::ate); 
+    ifs.open(filename, std::ios::in | std::ios::binary | std::ios::ate);
     if (!ifs.good()) {
         fprintf(stderr, "failed to open file %s\n", filename.c_str());
         return 1;
@@ -178,18 +178,18 @@ int main(int argc, char **argv)
         if (use_multiprocess_flag) {
 
             // multiple processes
-            
+
             for (int process_number = 0; process_number < thread_count; ++process_number) {
 
                 int pid = fork();
-                
+
                 if (0 == pid) {
-                    upload_part(process_number, thread_count, file_size, debug_flag, hostname.c_str(), bucket_name.c_str(), 
+                    upload_part(process_number, thread_count, file_size, debug_flag, hostname.c_str(), bucket_name.c_str(),
                                 access_key.c_str(), secret_access_key.c_str(), filename.c_str());
                     return 0;
                 }
 
-                printf("%s:%d (%s) [%d] started process %d\n", __FILE__, __LINE__, __FUNCTION__, 
+                printf("%s:%d (%s) [%d] started process %d\n", __FILE__, __LINE__, __FUNCTION__,
                         getpid(), pid);
             }
 
@@ -206,28 +206,28 @@ int main(int argc, char **argv)
 
             for (int thread_number = 0; thread_number <  thread_count; ++thread_number) {
 
-                printf("%s:%d (%s) start thread %d\n", __FILE__, __LINE__, __FUNCTION__, 
+                printf("%s:%d (%s) start thread %d\n", __FILE__, __LINE__, __FUNCTION__,
                         thread_number);
 
-                writer_threads[thread_number] = std::move(std::thread(upload_part, thread_number, 
-                            thread_count, file_size, debug_flag, hostname.c_str(), bucket_name.c_str(), 
+                writer_threads[thread_number] = std::move(std::thread(upload_part, thread_number,
+                            thread_count, file_size, debug_flag, hostname.c_str(), bucket_name.c_str(),
                             access_key.c_str(), secret_access_key.c_str(), filename.c_str()));
             }
 
 
             for (int thread_number = 0; thread_number <  thread_count; ++thread_number) {
 
-                printf("%s:%d (%s) calling join for writer thread %d\n", __FILE__, __LINE__, 
+                printf("%s:%d (%s) calling join for writer thread %d\n", __FILE__, __LINE__,
                         __FUNCTION__, thread_number);
 
                 writer_threads[thread_number].join();
-                
-                printf("%s:%d (%s) joined writer thread %d\n", __FILE__, __LINE__, 
+
+                printf("%s:%d (%s) joined writer thread %d\n", __FILE__, __LINE__,
                         __FUNCTION__, thread_number);
             }
 
             delete[] writer_threads;
-        } 
+        }
 
     }
 
@@ -235,7 +235,7 @@ int main(int argc, char **argv)
 
     if (mode == "download" || mode == "both") {
 
-        //if (mode == "both") { 
+        //if (mode == "both") {
         //    std::this_thread::sleep_for (std::chrono::seconds(4));
         //}
 
@@ -243,16 +243,16 @@ int main(int argc, char **argv)
         if (use_multiprocess_flag) {
 
             // multiple processes
-            
+
             for (int process_number = 0; process_number < thread_count; ++process_number) {
 
                 int pid = fork();
                 if (pid == 0) {
-                    download_part(process_number, thread_count, file_size, debug_flag, hostname.c_str(), bucket_name.c_str(), 
+                    download_part(process_number, thread_count, file_size, debug_flag, hostname.c_str(), bucket_name.c_str(),
                                 access_key.c_str(), secret_access_key.c_str(), filename.c_str());
                     return 0;
                 }
-                printf("%s:%d (%s) [%d] started process %d\n", __FILE__, __LINE__, __FUNCTION__, 
+                printf("%s:%d (%s) [%d] started process %d\n", __FILE__, __LINE__, __FUNCTION__,
                         getpid(), pid);
             }
 
@@ -264,26 +264,26 @@ int main(int argc, char **argv)
         } else {
 
             // multiple threads
-           
+
             std::thread *reader_threads = new std::thread[thread_count];
 
             for (int thread_number = 0; thread_number <  thread_count; ++thread_number) {
-                printf("%s:%d (%s) start reader thread %d\n", __FILE__, __LINE__, __FUNCTION__, 
+                printf("%s:%d (%s) start reader thread %d\n", __FILE__, __LINE__, __FUNCTION__,
                         thread_number);
-                reader_threads[thread_number] = std::move(std::thread(download_part, thread_number, 
-                            thread_count, file_size, debug_flag, hostname.c_str(), bucket_name.c_str(), 
+                reader_threads[thread_number] = std::move(std::thread(download_part, thread_number,
+                            thread_count, file_size, debug_flag, hostname.c_str(), bucket_name.c_str(),
                             access_key.c_str(), secret_access_key.c_str(), filename.c_str()));
             }
 
 
             for (int thread_number = 0; thread_number <  thread_count; ++thread_number) {
 
-                printf("%s:%d (%s) calling join for reader thread %d\n", __FILE__, __LINE__, 
+                printf("%s:%d (%s) calling join for reader thread %d\n", __FILE__, __LINE__,
                         __FUNCTION__, thread_number);
 
                 reader_threads[thread_number].join();
 
-                printf("%s:%d (%s) joined reader thread %d\n", __FILE__, __LINE__, 
+                printf("%s:%d (%s) joined reader thread %d\n", __FILE__, __LINE__,
                         __FUNCTION__, thread_number);
             }
 
@@ -296,19 +296,19 @@ int main(int argc, char **argv)
 
 }
 
-void upload_part(int thread_number, 
-                 const int thread_count, 
-                 const uint32_t file_size, 
-                 const bool debug_flag, 
-                 const char *hostname, 
-                 const char *bucket_name, 
-                 const char *access_key, 
-                 const char *secret_access_key, 
+void upload_part(int thread_number,
+                 const int thread_count,
+                 const uint32_t file_size,
+                 const bool debug_flag,
+                 const char *hostname,
+                 const char *bucket_name,
+                 const char *access_key,
+                 const char *secret_access_key,
                  const char *filename)
-{ 
+{
 
 
-    printf("%s:%d (%s) [upload thread=%u, seq=%u] writing from file into s3\n", 
+    printf("%s:%d (%s) [upload thread=%u, seq=%u] writing from file into s3\n",
             __FILE__, __LINE__, __FUNCTION__, thread_number, thread_number);
 
     // thread in irods only deal with sequential bytes.  figure out what bytes this thread deals with
@@ -322,7 +322,7 @@ void upload_part(int thread_number,
 
     std::ifstream ifs;
 
-    ifs.open(filename, std::ios::in | std::ios::binary | std::ios::ate); 
+    ifs.open(filename, std::ios::in | std::ios::binary | std::ios::ate);
     if (!ifs.good()) {
         fprintf(stderr, "failed to open file %s\n", filename);
         return;
@@ -335,7 +335,7 @@ void upload_part(int thread_number,
     char *current_buffer = new char[current_buffer_size];
     ifs.read((char*)(current_buffer), current_buffer_size);
 
-    printf("%s:%d (%s) [thread=%u, seq=%u] done reading file\n", 
+    printf("%s:%d (%s) [thread=%u, seq=%u] done reading file\n",
             __FILE__, __LINE__, __FUNCTION__, thread_number, thread_number);
 
     /*****************************************
@@ -358,7 +358,7 @@ void upload_part(int thread_number,
     ds1.seekp(start);
 
     // doing two writes here just to test that that works
-    ds1.write(current_buffer, 100); 
+    ds1.write(current_buffer, 100);
     ds1.write(current_buffer+100, current_buffer_size-100);
 
     printf("WRITE DONE FOR %d\n", thread_number);
@@ -373,37 +373,37 @@ void upload_part(int thread_number,
     // s3FileWrite copies its buffer so that iRODS can delete it after
     // s3FileWrite returns
     delete[] current_buffer;
-    
+
     ifs.close();
 
 }
 
-void download_part(int thread_number, 
-                   const int thread_count, 
-                   const uint32_t file_size, 
-                   const bool debug_flag, 
-                   const char *hostname, 
-                   const char *bucket_name, 
-                   const char *access_key, 
-                   const char *secret_access_key, 
+void download_part(int thread_number,
+                   const int thread_count,
+                   const uint32_t file_size,
+                   const bool debug_flag,
+                   const char *hostname,
+                   const char *bucket_name,
+                   const char *access_key,
+                   const char *secret_access_key,
                    const char *filename)
 {
-    printf("%s(%d, %d, %u, %d, %s, %s, %s, %s, %s)\n",  
+    printf("%s(%d, %d, %u, %d, %s, %s, %s, %s, %s)\n",
           __FUNCTION__,
-          thread_number, 
-          thread_count, 
-          file_size, 
-          debug_flag, 
-          hostname, 
-          bucket_name, 
-          access_key, 
-          secret_access_key, 
+          thread_number,
+          thread_count,
+          file_size,
+          debug_flag,
+          hostname,
+          bucket_name,
+          access_key,
+          secret_access_key,
           filename);
 
-    printf("%s:%d (%s) [download thread=%u, seq=%u] reading from s3 into file \n", 
+    printf("%s:%d (%s) [download thread=%u, seq=%u] reading from s3 into file \n",
             __FILE__, __LINE__, __FUNCTION__, thread_number, thread_number);
 
-    // thread in irods only deal with sequential bytes.  figure out what bytes this 
+    // thread in irods only deal with sequential bytes.  figure out what bytes this
     // thread deals with
     size_t start = thread_number * (file_size / thread_count);
     size_t end = 0;
@@ -415,8 +415,8 @@ void download_part(int thread_number,
 
     // open output stream for test
     std::ofstream ofs;
-    ofs.open((std::string(filename) + std::string(".downloaded")).c_str(), 
-            std::ios::out | std::ios::binary); 
+    ofs.open((std::string(filename) + std::string(".downloaded")).c_str(),
+            std::ios::out | std::ios::binary);
 
     if (!ofs.good()) {
         fprintf(stderr, "failed to open file %s\n", filename);
@@ -430,7 +430,7 @@ void download_part(int thread_number,
      * This part actually goes in S3 plugin. *
      *****************************************/
 
-    printf("tp1{%u, %d, %d, %d, %s, %s, %s, %s, %d, %s, %s, %s, %d}\n", 
+    printf("tp1{%u, %d, %d, %d, %s, %s, %s, %s, %d, %s, %s, %s, %d}\n",
             file_size, 100, 1, 1, hostname, bucket_name, access_key,
             secret_access_key, true, "V4", "http", "amz", true);
 
@@ -470,5 +470,5 @@ void download_part(int thread_number,
 
     // s3FileWrite copies its buffer so that iRODS can delete it after
     // s3FileWrite returns
-    
+
 }

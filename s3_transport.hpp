@@ -41,68 +41,18 @@
 #include <boost/algorithm/string.hpp>
 #include <boost/filesystem.hpp>
 
+// local includes
+#include "scoped_lock_test.hpp"
 
-namespace irods::experimental::io
+// TODO move all into s3_transport class
+// TODO char_type and buffer_type
+// TODO remove c-style casts
+// TODO capture all types from libs3 interface (use using libs3_buffer_type)
+
+namespace irods::experimental::io::s3_transport
 {
 
-    time_t get_shared_memory_timeout_seconds();
-
-    class scoped_lock_test 
-    {
-    public:
-
-        scoped_lock_test(const std::string& _mutex_name,
-                         const char *_file,
-                         int _line,
-                         const char *_function,
-                         int _object_identifier)
-            : mutex_name{_mutex_name}
-            , file{_file}
-            , line{_line}
-            , function{_function}
-            , named_mtx{nullptr}
-            , lock{nullptr}
-            , object_identifier{_object_identifier}
-        {
-            namespace bi = boost::interprocess;
-
-            if (file != nullptr && function != nullptr) {
-                printf("%s:%d (%s) [[%d]] ---LOCK--- waiting for lock\n", 
-                        file, line, function, object_identifier);
-            }
-
-            named_mtx = new bi::named_mutex(bi::open_or_create, mutex_name.c_str());
-            lock = new bi::scoped_lock<bi::named_mutex>(*named_mtx);
-
-            if (file != nullptr && function != nullptr) {
-                printf("%s:%d (%s) [[%d]] ---LOCK--- acquired lock\n", 
-                        file, line, function, object_identifier);
-            }
-        }
-
-        ~scoped_lock_test()
-        {
-            if (file != nullptr && function != nullptr) {
-                printf("%s:%d (%s) [[%d]] ---LOCK--- releasing lock\n", file, 
-                        line, function, object_identifier);
-            }
-
-            delete lock;
-            delete named_mtx;
-
-        }
-    private:
-
-        std::string mutex_name;
-        boost::interprocess::named_mutex *named_mtx;
-        boost::interprocess::scoped_lock<boost::interprocess::named_mutex> *lock;
-        const char *file;
-        int line;
-        const char *function;
-        int object_identifier;
-    };
-
-    namespace s3_transport_interprocess_types 
+    namespace interprocess_types
     {
 
         namespace bi = boost::interprocess;
@@ -113,7 +63,7 @@ namespace irods::experimental::io
         using int_allocator         = bi::allocator<int, segment_manager>;
         using char_allocator        = bi::allocator<char, segment_manager>;
         using shm_int_vector        = bi::vector<int, int_allocator>;
-        using shm_char_string       = bi::basic_string<char, std::char_traits<char>, 
+        using shm_char_string       = bi::basic_string<char, std::char_traits<char>,
                                       char_allocator>;
         using char_string_allocator = bi::allocator<shm_char_string, segment_manager>;
         using shm_string_vector     = bi::vector<shm_char_string, char_string_allocator>;
@@ -124,8 +74,8 @@ namespace irods::experimental::io
     struct multipart_shared_data
     {
 
-        multipart_shared_data(const s3_transport_interprocess_types::void_allocator &allocator)
-            : last_access_time{time(nullptr)}
+        multipart_shared_data(const interprocess_types::void_allocator &allocator)
+            : last_access_time_in_seconds{time(nullptr)}
             , file_open_cntr{0}
             , upload_id{allocator}
             , etags{allocator}
@@ -134,41 +84,48 @@ namespace irods::experimental::io
             , cache_file_download_completed_flag{false}
         {}
 
-        time_t                                             last_access_time;     // timeout for shmem
-        int                                                file_open_cntr;
-        s3_transport_interprocess_types::shm_char_string   upload_id;
-        s3_transport_interprocess_types::shm_string_vector etags;
-        int                                                last_irods_error_code;
-        bool                                               cache_file_download_started_flag;
-        bool                                               cache_file_download_completed_flag;
+        time_t                                last_access_time_in_seconds;     // timeout for shmem
+        int                                   file_open_cntr;
+        interprocess_types::shm_char_string   upload_id;
+        interprocess_types::shm_string_vector etags;
+        int                                   last_irods_error_code;
+        bool                                  cache_file_download_started_flag;
+        bool                                  cache_file_download_completed_flag;
     };
 
-    namespace s3_transport_constants {
+    namespace constants
+    {
 
-        const uint32_t MAX_S3_SHMEM_SIZE = sizeof(multipart_shared_data) +          
-                                         10000 * 35 +                    // max # parts * (etag_size+1)
-                                         129;                            // upload_id_size+1
+        const uint64_t    ETAG_SIZE{34};
+        const uint64_t    UPLOAD_ID_SIZE{128};
+        const uint64_t    MAX_S3_SHMEM_SIZE{sizeof(multipart_shared_data) +
+                                            10000 * (ETAG_SIZE + 1) +
+                                            UPLOAD_ID_SIZE + 1};
 
-        const std::string MULTIPART_SHARED_DATA_NAME("SharedData");
+        const std::string MULTIPART_SHARED_DATA_NAME{"SharedData"};
+        const int         DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS{900};
     }
 
 
 
-    multipart_shared_data *get_shared_data_with_timeout(const std::string& key, 
-                                                        s3_transport_interprocess_types::void_allocator& alloc_inst, 
-                                                        boost::interprocess::managed_shared_memory& segment, 
-                                                        time_t shared_memory_timeout_seconds) 
+    multipart_shared_data *get_shared_data_with_timeout(const std::string& key,
+                                                        interprocess_types::void_allocator& alloc_inst,
+                                                        boost::interprocess::managed_shared_memory& segment,
+                                                        time_t shared_memory_timeout_in_seconds)
     {
 
         multipart_shared_data *shared_data = segment.find_or_construct<multipart_shared_data>
             (key.c_str())(alloc_inst);
 
-        time_t now = time(0);
+        const time_t now = time(0);
 
-        if (now - shared_data->last_access_time > shared_memory_timeout_seconds) {
+        const bool shmem_has_expired = now - shared_data->last_access_time_in_seconds
+            > shared_memory_timeout_in_seconds;
 
-            // the shmem has expired, reset the fields 
-            shared_data->last_access_time = now;
+        if (shmem_has_expired) {
+
+            // reset the fields
+            shared_data->last_access_time_in_seconds = now;
             shared_data->file_open_cntr = 0;
             shared_data->upload_id = "";
             shared_data->etags.clear();
@@ -177,14 +134,14 @@ namespace irods::experimental::io
             shared_data->cache_file_download_completed_flag = false;
 
         } else {
-            shared_data->last_access_time = now;
+            shared_data->last_access_time_in_seconds = now;
         }
 
         return shared_data;
     }
 
 
-    void print_bucket_context(S3BucketContext& bucket_context)
+    void print_bucket_context(const S3BucketContext& bucket_context)
     {
         printf("BucketContext: [hostName=%s] [bucketName=%s][protocol=%d]"
                "[uriStyle=%d][accessKeyId=%s][secretAccessKey=%s]"
@@ -207,7 +164,6 @@ namespace irods::experimental::io
                                S3Status& pStatus,
                                bool debug_flag = false )
     {
-        int i;
 
         pStatus = status;
         if( debug_flag || status != S3StatusOK ) {
@@ -226,7 +182,7 @@ namespace irods::experimental::io
         if ((debug_flag || error) && error->extraDetailsCount) {
             printf( "%s", "  Extra Details:\n");
 
-            for (i = 0; i < error->extraDetailsCount; i++) {
+            for (int i = 0; i < error->extraDetailsCount; i++) {
                 printf( "    %s: %s\n", error->extraDetails[i].name,
                         error->extraDetails[i].value);
             }
@@ -234,173 +190,185 @@ namespace irods::experimental::io
     }  // end store_and_log_status
 
 
-    struct upload_page 
+    template <typename CharT>
+    struct upload_page
     {
-       std::vector<char> buffer;
-       bool              terminate_flag;
+       std::vector<CharT> buffer;
+       bool               terminate_flag;
     };
 
-    struct s3_stat 
+    // TODO how is this used?  remove?
+    struct s3_stat
     {
-        std::string key; 
+        std::string key;
         uint64_t    size;
         time_t      last_modified;
     };
 
 
-    struct callback_data_for_write
+    template <typename CharT>
+    struct data_for_write_callback
     {
-        callback_data_for_write(S3BucketContext& _saved_bucket_context, 
-                                irods::experimental::circular_buffer<upload_page>& _circular_buffer) 
+        data_for_write_callback(S3BucketContext& _saved_bucket_context,
+                                irods::experimental::circular_buffer<upload_page<CharT>>& _circular_buffer)
             : saved_bucket_context{_saved_bucket_context}
             , circular_buffer{_circular_buffer}
             , content_length{0}
             , original_content_length{0}
             , offset{0}
             , bytes_written{0}
-        {} 
+        {}
 
-        // TODO change all to char8_t - this seems to be a c++20 thing
-        std::vector<char> buffer;
-        uint32_t          offset;
+        // TODO use buffer_type
+        std::vector<CharT> buffer;
+        uint64_t          offset;
 
-        irods::experimental::circular_buffer<upload_page>&
+        irods::experimental::circular_buffer<upload_page<CharT>>&
                           circular_buffer;
 
         uint64_t          content_length;
         uint64_t          original_content_length;
-        uint32_t          bytes_written;
+        uint64_t          bytes_written;
         S3Status          status;
-        //int               keyCount;
-        //s3_stat           stat; 
 
         S3BucketContext&  saved_bucket_context;   /* To enable more detailed error messages */
         bool              debug_flag;
         int               object_identifier;
     };
 
-    class s3_read_callback 
+    template <typename CharT>
+    class callback_for_read_from_s3
     {
 
         public:
 
-            s3_read_callback(S3BucketContext& _saved_bucket_context) 
+            using char_type   = typename transport<CharT>::char_type;
+
+            callback_for_read_from_s3(S3BucketContext& _saved_bucket_context)
                 : saved_bucket_context{_saved_bucket_context}
-                , seq{0}
+                , sequence{0}
                 , offset{0}
                 , content_length{0}
                 , original_content_length{0}
             {}
 
-            virtual S3Status read_data_callback(int libs3_buffer_size,
-                                                const char *libs3_buffer) = 0;
+            virtual S3Status callback_implementation(int libs3_buffer_size,
+                                                const char_type *libs3_buffer) = 0;
 
-            static S3Status s3_read_data_callback_routine(int libs3_buffer_size,
-                                                          const char *libs3_buffer,
+            static S3Status invoke_callback(int libs3_buffer_size,
+                                                          const char_type *libs3_buffer,
                                                           void *callback_data)
             {
-                s3_read_callback *data = (s3_read_callback*)callback_data; 
-                return data->read_data_callback(libs3_buffer_size, libs3_buffer);
+                callback_for_read_from_s3 *data = (callback_for_read_from_s3*)callback_data;
+                return data->callback_implementation(libs3_buffer_size, libs3_buffer);
             }
 
-            static S3Status read_data_response_properties_callback(const S3ResponseProperties *properties,
+            static S3Status response_properties_callback(const S3ResponseProperties *properties,
                                                                    void *callback_data)
             {
                 // Don't need to do anything here
                 return S3StatusOK;
             }
 
-            static void read_data_response_completion_callback (S3Status status,
+            static void response_completion_callback (S3Status status,
                                                                 const S3ErrorDetails *error,
                                                                 void *callback_data)
             {
-                s3_read_callback *data = (s3_read_callback*)callback_data; 
-                store_and_log_status( status, error, __FUNCTION__, data->saved_bucket_context, data->status, 
+                callback_for_read_from_s3 *data = (callback_for_read_from_s3*)callback_data;
+                store_and_log_status( status, error, __FUNCTION__, data->saved_bucket_context, data->status,
                         data->debug_flag );
                 // Don't change the global error, we may want to retry at a higher level.
                 // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
             }
 
-            virtual ~s3_read_callback() {};
+            virtual ~callback_for_read_from_s3() {};
 
-            int              seq;
+            int              sequence;
 
             long             offset;       /* For multiple upload */
             uint64_t         content_length;
             uint64_t         original_content_length;
             S3Status         status;
-            //int             keyCount;
-            //s3_stat         stat; 
             S3BucketContext& saved_bucket_context; /* To enable more detailed error messages */
             bool             debug_flag;
     };
 
-    class s3_read_callback_to_cache : public s3_read_callback 
+    template <typename CharT>
+    class callback_for_read_from_s3_to_cache : public callback_for_read_from_s3<CharT>
     {
 
         public:
 
-            s3_read_callback_to_cache(S3BucketContext& _saved_bucket_context) 
-                : s3_read_callback{_saved_bucket_context} 
+            using char_type   = typename transport<CharT>::char_type;
+
+            callback_for_read_from_s3_to_cache(S3BucketContext& _saved_bucket_context)
+                : callback_for_read_from_s3<CharT>{_saved_bucket_context}
             {}
 
-            S3Status read_data_callback(int libs3_buffer_size,
-                                        const char *libs3_buffer) 
+            S3Status callback_implementation(int libs3_buffer_size,
+                                        const char_type *libs3_buffer)
             {
 
                 // writing output to cache file
 
-                ssize_t wrote = pwrite(cache_fd, libs3_buffer, libs3_buffer_size, offset);
-                if (wrote>0) offset += wrote;
+                auto wrote = pwrite(cache_fd, libs3_buffer, libs3_buffer_size, this->offset);
+                if (wrote>0) this->offset += wrote;
 
-                return ((wrote < (ssize_t) libs3_buffer_size) ?
+                return ((wrote < static_cast<decltype(wrote)>(libs3_buffer_size)) ?
                         S3StatusAbortedByCallback : S3StatusOK);
 
             }
-            ~s3_read_callback_to_cache() {};
+
+            ~callback_for_read_from_s3_to_cache() {};
+
+        //private:
 
             int cache_fd;
     };
 
-    class s3_read_callback_to_buffer : public s3_read_callback 
+    template <typename CharT>
+    class callback_for_read_from_buffer : public callback_for_read_from_s3<CharT>
     {
 
         public:
 
-            s3_read_callback_to_buffer(S3BucketContext& _saved_bucket_context) 
-                : s3_read_callback{_saved_bucket_context} 
+            using char_type   = typename transport<CharT>::char_type;
+
+            callback_for_read_from_buffer(S3BucketContext& _saved_bucket_context)
+                : callback_for_read_from_s3<CharT>{_saved_bucket_context}
             {}
 
-            S3Status read_data_callback(int libs3_buffer_size,
-                                        const char *libs3_buffer) 
+            S3Status callback_implementation(int libs3_buffer_size,
+                                        const char_type *libs3_buffer)
             {
                 // writing to buffer
 
-                int bytes_to_write = //libs3_buffer_size; 
-                      offset + libs3_buffer_size > output_buffer_size 
-                    ? output_buffer_size - offset 
+                // TODO type?
+                int bytes_to_write = //libs3_buffer_size;
+                      this->offset + libs3_buffer_size > output_buffer_size
+                    ? output_buffer_size - this->offset
                     : libs3_buffer_size;
 
-                memcpy(output_buffer + offset, libs3_buffer, bytes_to_write);
+                memcpy(output_buffer + this->offset, libs3_buffer, bytes_to_write);
 
-                offset += bytes_to_write;
+                this->offset += bytes_to_write;
 
                 return ((bytes_to_write < (ssize_t) libs3_buffer_size) ?
                         S3StatusAbortedByCallback : S3StatusOK);
 
             }
 
-            ~s3_read_callback_to_buffer() {};
+            ~callback_for_read_from_buffer() {};
 
-            char            *output_buffer;
-            uint32_t        output_buffer_size;
+        //private:
+
+            char_type       *output_buffer;
+            uint64_t        output_buffer_size;
 
     };
-        
-    const unsigned int S3_DEFAULT_RETRY_WAIT_SEC = 1;
-    const unsigned int S3_DEFAULT_RETRY_COUNT = 1;
 
     // Returns timestamp in usec for delta-t comparisons
+    // TODO only fo debug, rename and find a new home
     static unsigned long long usNow()
     {
         struct timeval tv;
@@ -424,278 +392,294 @@ namespace irods::experimental::io
 
         /* Below used for the upload completion command, need to send in XML */
         std::string              xml;
+        // TODO derive types
         long                     remaining;
         long                     offset;
         bool                     debug_flag;
         S3Status                 status;            /* status returned by libs3 */
         std::string              object_key;
-        time_t                   shared_memory_timeout_seconds;
+        time_t                   shared_memory_timeout_in_seconds;
     };
 
+    template <typename CharT>
     struct multipart_data
     {
         multipart_data(upload_manager& _manager,
                        S3BucketContext& _bucket_context,
-                       irods::experimental::circular_buffer<upload_page>& _circular_buffer) 
+                       irods::experimental::circular_buffer<upload_page<CharT>>& _circular_buffer)
             : manager{_manager}
             , put_object_data{_bucket_context, _circular_buffer}
+            , sequence{0}
+            , status{S3StatusOK}
+            , enable_md5{false}
+            , server_encrypt{false}
+            , debug_flag{false}
+            , object_identifier{0}
+            , shared_memory_timeout_in_seconds{constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS}
         {}
 
 
-        int                                    seq;                /* Sequence number, i.e. which part */
+        int                                    sequence;                /* Sequence number, i.e. which part */
         int                                    mode;               /* PUT or COPY */
-        callback_data_for_write                put_object_data;    /* File being uploaded */
+        data_for_write_callback<CharT>         put_object_data;    /* File being uploaded */
         std::reference_wrapper<upload_manager> manager;           /* To update w/the MD5 returned */
+        // TODO derive S3Status
         S3Status                               status;
         bool                                   enable_md5;
         bool                                   server_encrypt;
         bool                                   debug_flag;
         int                                    object_identifier;
-        time_t                                 shared_memory_timeout_seconds;
+        time_t                                 shared_memory_timeout_in_seconds;
     };
 
-    namespace s3_mpu_init_callback 
+    namespace s3_multipart_upload
     {
-
-        S3Status response (const char* upload_id,
-                           void *callback_data )
-        {
-            namespace bi = boost::interprocess;
-            namespace types = s3_transport_interprocess_types;
-
-            upload_manager *manager = (upload_manager *)callback_data;
-
-            // upload upload_id in shared memory
-            std::string& object_key = manager->object_key;
-
-            std::string shared_memory_name =  object_key + "-shm";
-
-            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 
-                    s3_transport_constants::MAX_S3_SHMEM_SIZE);
-
-            types::void_allocator alloc_inst(segment.get_segment_manager());
-
-            // no need to lock as this should already be locked
-            multipart_shared_data *shared_data = get_shared_data_with_timeout(
-                    s3_transport_constants::MULTIPART_SHARED_DATA_NAME, alloc_inst, 
-                    segment, manager->shared_memory_timeout_seconds);
-
-            shared_data->upload_id = upload_id;
-
-            return S3StatusOK;
-        } // end response
-
-        S3Status response_properties (const S3ResponseProperties *properties,
-                                      void *callback_data)
-        {
-            return S3StatusOK;
-        } // end response_properties
-
-        void response_complete (S3Status status,
-                                const S3ErrorDetails *error,
-                                void *callback_data)
-        {
-            upload_manager *data = (upload_manager*)callback_data;
-            store_and_log_status( status, error, __FUNCTION__, data->saved_bucket_context,
-                    data->status, data->debug_flag );
-        } // end response_complete
-
-    } // end namespace s3_mpu_init_callback
-
-
-    /* Uploading the multipart completion XML from our buffer */
-    namespace s3_mpu_commit_callback 
-    {
-        int response (int bufferSize,
-                      char *buffer,
-                      void *callback_data)
-        {
-            upload_manager *manager = (upload_manager *)callback_data;
-            long ret = 0;
-            if (manager->remaining) {
-                int toRead = ((manager->remaining > bufferSize) ?
-                              bufferSize : manager->remaining);
-                memcpy(buffer, manager->xml.c_str() + manager->offset, toRead);
-                ret = toRead;
-            }
-            manager->remaining -= ret;
-            manager->offset += ret;
-
-            return (int)ret;
-        } // end commit
-
-        S3Status response_properties (const S3ResponseProperties *properties,
-                                      void *callback_data)
-        {
-            return S3StatusOK;
-        } // end response_properties
-
-        void response_completion (S3Status status,
-                                  const S3ErrorDetails *error,
-                                  void *callback_data)
-        {
-            upload_manager *data = (upload_manager*)callback_data;
-            store_and_log_status( status, error, __FUNCTION__, data->saved_bucket_context,
-                    data->status, data->debug_flag );
-            // Don't change the global error, we may want to retry at a higher level.
-            // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
-        } // end response_completion
-
-
-    } // end namespace s3_mpu_commit_callback 
-
-
-    namespace s3_mpu_part_callback 
-    {
-
-        int put_object_data_callback(int libs3_buffer_size,
-                                     char *libs3_buffer,
-                                     void *callback_data)
+        namespace initialization_callback
         {
 
-            // keep reading a bufferSize bytes from buffer.
-            // if buffer is empty, get another from the circular_buffer
-            callback_data_for_write *data = (callback_data_for_write *) callback_data;
-            irods::experimental::circular_buffer<upload_page>& circular_buffer =
-                data->circular_buffer;
+            S3Status response (const char* upload_id,
+                               void *callback_data )
+            {
+                namespace bi = boost::interprocess;
+                namespace types = interprocess_types;
 
-            // if we've already written the expected number of bytes, just return 0 which will
-            // trigger the completion
-            if (data->bytes_written >= data->content_length) {
-                return 0;
-            }
+                upload_manager *manager = (upload_manager *)callback_data;
 
-            // if we've exhausted our current buffer, read the next buffer from the circular_buffer
-            while (data->offset >= data->buffer.size()) {
+                // upload upload_id in shared memory
+                std::string& object_key = manager->object_key;
 
-                upload_page page;
+                std::string shared_memory_name =  object_key + "-shm";
 
-                // read the first page
-                if (data->debug_flag) {
-                    printf("%s:%d (%s) [[%d]] waiting to read\n", __FILE__, __LINE__, __FUNCTION__, 
-                            data->object_identifier);
+                bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(),
+                        constants::MAX_S3_SHMEM_SIZE);
+
+                types::void_allocator alloc_inst(segment.get_segment_manager());
+
+                // no need to lock as this should already be locked
+                multipart_shared_data *shared_data = get_shared_data_with_timeout(
+                        constants::MULTIPART_SHARED_DATA_NAME, alloc_inst,
+                        segment, manager->shared_memory_timeout_in_seconds);
+
+                shared_data->upload_id = upload_id;
+
+                return S3StatusOK;
+            } // end response
+
+            S3Status response_properties (const S3ResponseProperties *properties,
+                                          void *callback_data)
+            {
+                return S3StatusOK;
+            } // end response_properties
+
+            void response_complete (S3Status status,
+                                    const S3ErrorDetails *error,
+                                    void *callback_data)
+            {
+                upload_manager *data = (upload_manager*)callback_data;
+                store_and_log_status( status, error, __FUNCTION__, data->saved_bucket_context,
+                        data->status, data->debug_flag );
+            } // end response_complete
+
+        } // end namespace initialization_callback
+
+
+        /* Uploading the multipart completion XML from our buffer */
+        namespace commit_callback
+        {
+            template <typename CharT>
+            int response (int bufferSize,
+                          CharT *buffer,
+                          void *callback_data)
+            {
+                upload_manager *manager = (upload_manager *)callback_data;
+                long ret = 0;
+                if (manager->remaining) {
+                    int toRead = ((manager->remaining > bufferSize) ?
+                                  bufferSize : manager->remaining);
+                    memcpy(buffer, manager->xml.c_str() + manager->offset, toRead);
+                    ret = toRead;
                 }
-                circular_buffer.pop_front(page);
-                if (data->debug_flag) {
-                    printf("%s:%d (%s) [[%d]] read page [buffer=%p][buffer_size=%lu][terminate_flag=%d]\n",
-                            __FILE__, __LINE__, __FUNCTION__, data->object_identifier, page.buffer.data(), 
-                            page.buffer.size(), page.terminate_flag);
-                }
-                data->buffer = page.buffer;
-                data->offset = 0;
-            }
+                manager->remaining -= ret;
+                manager->offset += ret;
 
-            auto length = libs3_buffer_size > data->buffer.size() - data->offset
-                ? data->buffer.size() - data->offset
-                : libs3_buffer_size;
+                return (int)ret;
+            } // end commit
 
-            memcpy(libs3_buffer, data->buffer.data() + data->offset, length);
+            S3Status response_properties (const S3ResponseProperties *properties,
+                                          void *callback_data)
+            {
+                return S3StatusOK;
+            } // end response_properties
 
-            data->offset += length;
-            data->bytes_written += length;
-
-            return length;
-        } // end put_object_data_callback
-
-        /* Upload data from the part, use the plain callback_data reader */
-        int put_data (int bufferSize,
-                      char *buffer,
-                      void *callback_data)
-        {
-            return put_object_data_callback( bufferSize, buffer,
-                                          &((multipart_data*)callback_data)->put_object_data );
-        } // end put_data
-
-        S3Status response_properties (const S3ResponseProperties *properties,
+            void response_completion (S3Status status,
+                                      const S3ErrorDetails *error,
                                       void *callback_data)
+            {
+                upload_manager *data = (upload_manager*)callback_data;
+                store_and_log_status( status, error, __FUNCTION__, data->saved_bucket_context,
+                        data->status, data->debug_flag );
+                // Don't change the global error, we may want to retry at a higher level.
+                // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
+            } // end response_completion
+
+
+        } // end namespace commit_callback
+
+
+        namespace part_transport_callback
         {
-            // update etag for this object
-            
-            namespace bi = boost::interprocess;
-            namespace types = s3_transport_interprocess_types;
+            template <typename CharT>
+            int put_data (int libs3_buffer_size,
+                          CharT *libs3_buffer,
+                          void *callback_data)
+            {
+                data_for_write_callback<CharT>& data = (static_cast<multipart_data<CharT>*>(callback_data))->put_object_data;
 
-            multipart_data *data = (multipart_data *)callback_data;
+                // keep reading a bufferSize bytes from buffer.
+                // if buffer is empty, get another from the circular_buffer
+                irods::experimental::circular_buffer<upload_page<CharT>>& circular_buffer =
+                    data.circular_buffer;
 
-            std::string& object_key = static_cast<upload_manager&>(data->manager).object_key;
-
-            std::string shared_memory_name =  object_key + "-shm";
-            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 
-                    s3_transport_constants::MAX_S3_SHMEM_SIZE);
-
-            types::void_allocator alloc_inst(segment.get_segment_manager());
-
-            // lock for update
-            std::string mtx_name = object_key + "-mtx";
-            bi::named_mutex named_mtx{bi::open_or_create, mtx_name.c_str()};
-            bi::scoped_lock<bi::named_mutex> lock(named_mtx);
-            //scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__, data->object_identifier);
-
-            int object_identifier = data->object_identifier;
-            multipart_shared_data *shared_data = get_shared_data_with_timeout(
-                    s3_transport_constants::MULTIPART_SHARED_DATA_NAME, alloc_inst, 
-                    segment, data->shared_memory_timeout_seconds);
-            int seq = data->seq;
-            const char *etag = properties->eTag;
-
-            // Update the etags vector.  It should be sized large enough
-            // to not require a resize but resize if necessary.
-            if (seq > shared_data->etags.size()) {
-                try {
-                    shared_data->etags.resize(seq, types::shm_char_string("", alloc_inst));
-                } catch (std::bad_alloc& ba) {
-                    return S3StatusOutOfMemory;
+                // if we've already written the expected number of bytes, just return 0 which will
+                // trigger the completion
+                if (data.bytes_written >= data.content_length) {
+                    return 0;
                 }
-            }
 
-            if (etag) {
-                shared_data->etags[seq - 1] = etag;
-            } else {
-                shared_data->etags[seq - 1] = "";
-            }
+                // if we've exhausted our current buffer, read the next buffer from the circular_buffer
+                while (data.offset >= data.buffer.size()) {
 
-            return S3StatusOK;
-        } // end response_properties
+                    upload_page<CharT> page;
 
-        void response_completion (S3Status status,
-                                  const S3ErrorDetails *error,
-                                  void *callback_data)
-        {
-            multipart_data *data = (multipart_data *)callback_data;
-            store_and_log_status( status, error, __FUNCTION__, data->put_object_data.saved_bucket_context,
-                    data->status, data->debug_flag);
+                    // read the first page
+                    if (data.debug_flag) {
+                        printf("%s:%d (%s) [[%d]] waiting to read\n", __FILE__, __LINE__, __FUNCTION__,
+                                data.object_identifier);
+                    }
+                    circular_buffer.pop_front(page);
+                    if (data.debug_flag) {
+                        printf("%s:%d (%s) [[%d]] read page [buffer=%p][buffer_size=%lu][terminate_flag=%d]\n",
+                                __FILE__, __LINE__, __FUNCTION__, data.object_identifier, page.buffer.data(),
+                                page.buffer.size(), page.terminate_flag);
+                    }
+                    data.buffer = page.buffer;
+                    data.offset = 0;
+                }
 
-            // Don't change the global error, we may want to retry at a higher level.
-            // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
-        } // end response_completion
+                // TODO bool libs3_buffer_larger_than_remaining_transport_buffer
+                // TODO auto remaining_transport_buffer_size
+                auto remaining_transport_buffer_size = data.buffer.size() - data.offset;
+                bool libs3_buffer_larger_than_remaining_transport_buffer = libs3_buffer_size
+                    > remaining_transport_buffer_size;
+                auto length = libs3_buffer_larger_than_remaining_transport_buffer
+                    ? remaining_transport_buffer_size
+                    : libs3_buffer_size;
 
-    } // end namespace s3_mpu_part_callback 
+                memcpy(libs3_buffer, data.buffer.data() + data.offset, length);
+
+                data.offset += length;
+                data.bytes_written += length;
+
+                return length;
+            } // end put_data
 
 
-    namespace s3_mpu_cancel_callback 
-    {
-        S3Status response_properties (const S3ResponseProperties *properties,
+            template <typename CharT>
+            S3Status response_properties (const S3ResponseProperties *properties,
+                                          void *callback_data)
+            {
+                // update etag for this object
+
+                namespace bi = boost::interprocess;
+                namespace types = interprocess_types;
+
+                //TODO reduce this boilerplate
+
+                multipart_data<CharT> *data = (multipart_data<CharT> *)callback_data;
+
+                const auto& object_key = static_cast<upload_manager&>(data->manager).object_key;
+
+                auto shared_memory_name =  object_key + "-shm";
+                bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(),
+                        constants::MAX_S3_SHMEM_SIZE);
+
+                types::void_allocator alloc_inst(segment.get_segment_manager());
+
+                // lock for update
+                auto mtx_name = object_key + "-mtx";
+                bi::named_mutex named_mtx{bi::open_or_create, mtx_name.c_str()};
+                bi::scoped_lock<bi::named_mutex> lock(named_mtx);
+                //scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__, data->object_identifier);
+
+                auto object_identifier = data->object_identifier;
+                multipart_shared_data *shared_data = get_shared_data_with_timeout(
+                        constants::MULTIPART_SHARED_DATA_NAME, alloc_inst,
+                        segment, data->shared_memory_timeout_in_seconds);
+                auto sequence = data->sequence;
+                const char *etag = properties->eTag;
+
+                // Update the etags vector.  It should be sized large enough
+                // to not require a resize but resize if necessary.
+                if (sequence > shared_data->etags.size()) {
+                    try {
+                        shared_data->etags.resize(sequence, types::shm_char_string("", alloc_inst));
+                    } catch (std::bad_alloc& ba) {
+                        return S3StatusOutOfMemory;
+                    }
+                }
+
+                if (etag) {
+                    shared_data->etags[sequence - 1] = etag;
+                } else {
+                    shared_data->etags[sequence - 1] = "";
+                }
+
+                return S3StatusOK;
+            } // end response_properties
+
+            template <typename CharT>
+            void response_completion (S3Status status,
+                                      const S3ErrorDetails *error,
                                       void *callback_data)
+            {
+                multipart_data<CharT> *data = (multipart_data<CharT> *)callback_data;
+                store_and_log_status( status, error, __FUNCTION__, data->put_object_data.saved_bucket_context,
+                        data->status, data->debug_flag);
+
+                // Don't change the global error, we may want to retry at a higher level.
+                // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
+            } // end response_completion
+
+        } // end namespace part_transport_callback
+
+
+        namespace cancel_callback
         {
-            return S3StatusOK;
-        } // response_properties
+            S3Status response_properties (const S3ResponseProperties *properties,
+                                          void *callback_data)
+            {
+                return S3StatusOK;
+            } // response_properties
 
-        // S3_abort_multipart_upload() does not allow a callback_data parameter, so pass the
-        // final operation status using this global.
-        // TODO do something different
-        static S3Status g_response_completion_status = S3StatusOK;
-        static S3BucketContext *g_response_completion_saved_bucket_context = nullptr;
+            // S3_abort_multipart_upload() does not allow a callback_data parameter, so pass the
+            // final operation status using this global.
 
-        void response_completion (S3Status status,
-                                  const S3ErrorDetails *error,
-                                  void *callback_data)
-        {
-            store_and_log_status( status, error, __FUNCTION__, *g_response_completion_saved_bucket_context,
-                    g_response_completion_status, false );
-            // Don't change the global error, we may want to retry at a higher level.
-            // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
-        } // end response_completion
+            // TODO do something different
+            static S3Status g_response_completion_status = S3StatusOK;
+            static S3BucketContext *g_response_completion_saved_bucket_context = nullptr;
 
-    } // end namespace s3_mpu_cancel_callback 
+            void response_completion (S3Status status,
+                                      const S3ErrorDetails *error,
+                                      void *callback_data)
+            {
+                store_and_log_status( status, error, __FUNCTION__, *g_response_completion_saved_bucket_context,
+                        g_response_completion_status, false );
+                // Don't change the global error, we may want to retry at a higher level.
+                // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
+            } // end response_completion
+
+        } // end namespace cancel_callback
+    }
 
     // Sleep for *at least* the given time, plus some up to 1s additional
     // The random addition ensures that threads don't all cluster up and retry
@@ -716,10 +700,10 @@ namespace irods::experimental::io
         usleep( us );
     } // end s3_sleep
 
-    struct s3_transport_config 
+    struct config
     {
 
-        s3_transport_config() 
+        config()
             : object_size{0}
             , number_of_transfer_threads{1}
             , part_size{1000}
@@ -730,7 +714,7 @@ namespace irods::experimental::io
             , access_key{""}
             , secret_access_key{""}
             , multipart_flag{true}
-            , shared_memory_timeout_seconds{900}
+            , shared_memory_timeout_in_seconds{constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS}
             , enable_md5_flag{false}
             , server_encrypt_flag{false}
             , s3_signature_version_str{"v4"}
@@ -740,11 +724,11 @@ namespace irods::experimental::io
             , debug_flag{false}
             , object_identifier{0}  // just for debug purposes
         {}
-                
-        uint32_t     object_size;
+
+        uint64_t     object_size;
         int          number_of_transfer_threads; // only used when doing full file upload/download via cache
                                                        // otherwise it is controlled by iRODS
-        uint32_t     part_size;                  // only used when doing a multipart upload 
+        uint64_t     part_size;                  // only used when doing a multipart upload
         int          retry_count_limit;
         int          retry_wait_seconds;
         std::string  hostname;
@@ -752,7 +736,7 @@ namespace irods::experimental::io
         std::string  access_key;
         std::string  secret_access_key;
         bool         multipart_flag;
-        time_t       shared_memory_timeout_seconds;
+        time_t       shared_memory_timeout_in_seconds;
         bool         enable_md5_flag;
         bool         server_encrypt_flag;
         std::string  s3_signature_version_str;
@@ -770,6 +754,7 @@ namespace irods::experimental::io
 
         // clang-format off
         using char_type   = typename transport<CharT>::char_type;
+        using buffer_type = std::vector<char_type>;
         using traits_type = typename transport<CharT>::traits_type;
         using int_type    = typename traits_type::int_type;
         using pos_type    = typename traits_type::pos_type;
@@ -790,7 +775,7 @@ namespace irods::experimental::io
 
     public:
 
-        explicit s3_transport(const s3_transport_config& _config)
+        explicit s3_transport(const config& _config)
 
             : transport<CharT>{}
             , object_size_{_config.object_size}
@@ -803,7 +788,7 @@ namespace irods::experimental::io
             , access_key_{_config.access_key}
             , secret_access_key_{_config.secret_access_key}
             , multipart_flag_{_config.multipart_flag}
-            , shared_memory_timeout_seconds_{_config.shared_memory_timeout_seconds}
+            , shared_memory_timeout_in_seconds_{_config.shared_memory_timeout_in_seconds}
             , enable_md5_flag_{_config.enable_md5_flag}
             , server_encrypt_flag_{_config.server_encrypt_flag}
             , cache_directory_{_config.cache_directory}
@@ -825,19 +810,22 @@ namespace irods::experimental::io
             , mpu_data_{upload_manager_, bucket_context_, circular_buffer_}
         {
 
+            // TODO figure out mpu_data_ initialization - how is this working?  do not memset
 
             memset(&mpu_data_, 0, sizeof(mpu_data_));
             mpu_data_.enable_md5 = enable_md5_flag_;
             mpu_data_.server_encrypt = server_encrypt_flag_;
             mpu_data_.object_identifier = object_identifier_;
-            mpu_data_.shared_memory_timeout_seconds = shared_memory_timeout_seconds_;
+            mpu_data_.shared_memory_timeout_in_seconds = shared_memory_timeout_in_seconds_;
 
+            // TODO initialize no memset
             memset(&put_props_, 0, sizeof(put_props_));
 
             upload_manager_.debug_flag = debug_flag_;
-            upload_manager_.shared_memory_timeout_seconds = shared_memory_timeout_seconds_;
+            upload_manager_.shared_memory_timeout_in_seconds = shared_memory_timeout_in_seconds_;
             mpu_data_.debug_flag = debug_flag_;
 
+            // TODO initialize no memset
             memset(&bucket_context_, 0, sizeof(bucket_context_));
             bucket_context_.hostName        = hostname_.c_str();
             bucket_context_.bucketName      = bucket_name_.c_str();
@@ -926,7 +914,7 @@ namespace irods::experimental::io
         {
 
             namespace bi = boost::interprocess;
-            namespace types = s3_transport_interprocess_types;
+            namespace types = interprocess_types;
 
             if (!is_open()) {
                 return false;
@@ -936,19 +924,20 @@ namespace irods::experimental::io
             fd_ = uninitialized_file_descriptor;
 
             std::string shared_memory_name =  object_key_ + "-shm";
-            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 
-                    s3_transport_constants::MAX_S3_SHMEM_SIZE);
+            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(),
+                    constants::MAX_S3_SHMEM_SIZE);
 
             types::void_allocator alloc_inst(segment.get_segment_manager());
             int open_flags = populate_open_mode_flags();
 
             // if it is a full multpart upload, wait for the upload to complete
+            // TODO write a function that captures this is_full_multipart_upload
             if ( multipart_flag_ && (O_CREAT | O_WRONLY | O_TRUNC) == open_flags ) {
 
                 // This was a full multipart upload w/o cache.
 
                 if (debug_flag_) {
-                    printf("%s:%d (%s) [[%d]] wait for join of upload thread\n", 
+                    printf("%s:%d (%s) [[%d]] wait for join of upload thread\n",
                             __FILE__, __LINE__, __FUNCTION__, object_identifier_);
                 }
 
@@ -967,12 +956,17 @@ namespace irods::experimental::io
             // read the open_count
             std::string mtx_name = object_key_ + "-mtx";
             bi::named_mutex named_mtx{bi::open_or_create, mtx_name.c_str()};
+            // TODO rename to shared_memory_lock - or is this used for other things as well?
+
+            // TODO alias bi::scoped_lock<bi::named_mutex>
             bi::scoped_lock<bi::named_mutex> lock(named_mtx);
             //scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__, object_identifier_);
-            
+
             multipart_shared_data *shared_data = get_shared_data_with_timeout(
-                    s3_transport_constants::MULTIPART_SHARED_DATA_NAME, alloc_inst, 
-                    segment, shared_memory_timeout_seconds_);
+                    constants::MULTIPART_SHARED_DATA_NAME, alloc_inst,
+                    segment, shared_memory_timeout_in_seconds_);
+
+            // TODO add generic interface to shared memory with locking
             int file_open_cntr = --(shared_data->file_open_cntr);
 
             if (file_open_cntr == 0) {
@@ -989,17 +983,18 @@ namespace irods::experimental::io
                     // lock during download so we must temporarily unlock
                     lock.unlock();
 
-                    // go ahead and upload the object 
+                    // go ahead and upload the object
                     cache_fd_ = open(cache_file.string().c_str(), O_RDONLY);
-                    off_t cache_file_size = lseek(cache_fd_, 0, SEEK_END); 
+                    off_t cache_file_size = lseek(cache_fd_, 0, SEEK_END);
 
-                    uint32_t part_size = cache_file_size / number_of_transfer_threads_;
+                    uint64_t part_size = cache_file_size / number_of_transfer_threads_;
 
-                    unsigned long long usStart = usNow(); 
+                    // TODO function create_transport_thread_list()
+                    unsigned long long usStart = usNow();
                     std::list<std::thread*> threads;
                     for (int thr_id=0; thr_id < number_of_transfer_threads_; thr_id++) {
 
-                        uint32_t buffer_size;
+                        uint64_t buffer_size;
                         if (thr_id == number_of_transfer_threads_ - 1) {
                             buffer_size = part_size + (object_size_ - part_size * number_of_transfer_threads_);
                         } else {
@@ -1007,13 +1002,14 @@ namespace irods::experimental::io
                         }
 
                         // TODO
-                        //std::thread *thisThread = new std::thread(&s3_transport::s3_upload_part_worker_routine, 
+                        //std::thread *thisThread = new std::thread(&s3_transport::s3_upload_part_worker_routine,
                         //        this, nullptr, buffer_size);
                         //threads.push_back(thisThread);
 
                     }
 
                     // Wait for threads to finish
+                    // TODO wait_for_transport_threads()
                     while (!threads.empty()) {
                         std::thread *thisThread = threads.front();
                         thisThread->join();
@@ -1061,7 +1057,8 @@ namespace irods::experimental::io
 
             // Put the buffer on the circular buffer.
             // We must copy the buffer because it will persist after send returns.
-            std::vector<char> copied_buffer(_buffer, _buffer + _buffer_size);
+            // TODO std::vector<char_type> abstracted out
+            std::vector<char_type> copied_buffer(_buffer, _buffer + _buffer_size);
             circular_buffer_.push_back({copied_buffer});
 
             if (debug_flag_) {
@@ -1073,7 +1070,7 @@ namespace irods::experimental::io
             if (!begin_part_upload_thread_ptr_) {
                 begin_part_upload_thread_ptr_ = new std::thread(&s3_transport::s3_upload_part_worker_routine, this);
             }
-            
+
 
             return _buffer_size;
 
@@ -1159,7 +1156,7 @@ namespace irods::experimental::io
 
     private:
 
-        void remove_shared_memory() 
+        void remove_shared_memory()
         {
             namespace bi = boost::interprocess;
 
@@ -1235,7 +1232,7 @@ namespace irods::experimental::io
                        Function _func)
         {
             namespace bi = boost::interprocess;
-            namespace types = s3_transport_interprocess_types;
+            namespace types = interprocess_types;
 
             if (debug_flag_) {
                 printf("%s:%d (%s) [[%d]] [_mode & in = %d][_mode & out = %d][_mode & trunc = %d][_mode & app = %d]\n",
@@ -1277,8 +1274,8 @@ namespace irods::experimental::io
 
 
             std::string shared_memory_name =  object_key_ + "-shm";
-            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 
-                    s3_transport_constants::MAX_S3_SHMEM_SIZE);
+            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(),
+                    constants::MAX_S3_SHMEM_SIZE);
 
             types::void_allocator alloc_inst(segment.get_segment_manager());
 
@@ -1289,12 +1286,12 @@ namespace irods::experimental::io
             //scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__, object_identifier_);
 
             multipart_shared_data *shared_data = get_shared_data_with_timeout(
-                    s3_transport_constants::MULTIPART_SHARED_DATA_NAME, alloc_inst, 
-                    segment, shared_memory_timeout_seconds_);
+                    constants::MULTIPART_SHARED_DATA_NAME, alloc_inst,
+                    segment, shared_memory_timeout_in_seconds_);
 
             ++(shared_data->file_open_cntr);
 
-            // each process must intitialize S3 
+            // each process must intitialize S3
             if (s3_initialized_counter_ == 0) {
 
                 int flags = S3_INIT_ALL;
@@ -1311,12 +1308,12 @@ namespace irods::experimental::io
 
             }
             ++s3_initialized_counter_;
-                
+
             if (object_exists && download_to_cache_) {
 
                 namespace bf = boost::filesystem;
 
-                // TODO not yet tested 
+                // TODO not yet tested
 
                 // TODO not sure how boost::filesystem will handle this if object_key_ has a directory structure in it. test.
                 bf::path cache_file =  bf::path(cache_directory_) / bf::path(object_key_ + "-cache");
@@ -1332,20 +1329,20 @@ namespace irods::experimental::io
                     // go ahead and download the object to cache file
                     cache_fd_ = open(cache_file.string().c_str(), O_WRONLY);
 
-                    uint32_t part_size = object_size_ / number_of_transfer_threads_;
+                    uint64_t part_size = object_size_ / number_of_transfer_threads_;
 
-                    unsigned long long usStart = usNow(); 
+                    unsigned long long usStart = usNow();
                     std::list<std::thread*> threads;
                     for (int thr_id=0; thr_id < number_of_transfer_threads_; thr_id++) {
 
-                        uint32_t this_part_size;
+                        uint64_t this_part_size;
                         if (thr_id == number_of_transfer_threads_ - 1) {
                             this_part_size = part_size + (object_size_ - part_size * number_of_transfer_threads_);
                         } else {
                             this_part_size = part_size;
                         }
 
-                        std::thread *this_thread= new std::thread(&s3_transport::s3_download_part_worker_routine, 
+                        std::thread *this_thread= new std::thread(&s3_transport::s3_download_part_worker_routine,
                                 this, nullptr, this_part_size);
                         threads.push_back(this_thread);
 
@@ -1370,7 +1367,7 @@ namespace irods::experimental::io
                 //      can't use std::condition_variable because of the multiprocess case
                 //      get it working and then fix it
                 while (!(shared_data->cache_file_download_completed_flag)) {
-                    
+
                     // unlock so others can continue
                     lock.unlock();
 
@@ -1402,7 +1399,8 @@ namespace irods::experimental::io
                     } else {
                         if (shared_data->last_irods_error_code < 0) {
                             printf("%s:%d (%s) [[%d]] open returning false [last_irods_error_code=%d]\n",
-                                    __FILE__, __LINE__, __FUNCTION__, object_identifier_, shared_data->last_irods_error_code);
+                                    __FILE__, __LINE__, __FUNCTION__, object_identifier_,
+                                    shared_data->last_irods_error_code);
                             return false;
                         }
                     }
@@ -1435,7 +1433,7 @@ namespace irods::experimental::io
         int initiate_multipart_upload()
         {
             namespace bi = boost::interprocess;
-            namespace types = s3_transport_interprocess_types;
+            namespace types = interprocess_types;
 
             int cache_fd = -1;
             int err_status = 0;
@@ -1457,7 +1455,7 @@ namespace irods::experimental::io
 
             int partContentLength = 0;
 
-            callback_data_for_write data{bucket_context_, circular_buffer_};
+            data_for_write_callback data{bucket_context_, circular_buffer_};
             memset(&data, 0, sizeof(data));
             data.content_length = data.original_content_length = object_size_;
             data.debug_flag = debug_flag_;
@@ -1465,21 +1463,21 @@ namespace irods::experimental::io
 
             // read shared memory entry for this key (shmem already locked here)
             std::string shared_memory_name =  object_key_ + "-shm";
-            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 
-                    s3_transport_constants::MAX_S3_SHMEM_SIZE);
+            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(),
+                    constants::MAX_S3_SHMEM_SIZE);
 
             types::void_allocator alloc_inst(segment.get_segment_manager());
             multipart_shared_data *shared_data = get_shared_data_with_timeout(
-                    s3_transport_constants::MULTIPART_SHARED_DATA_NAME, alloc_inst, 
-                    segment, shared_memory_timeout_seconds_);
+                    constants::MULTIPART_SHARED_DATA_NAME, alloc_inst,
+                    segment, shared_memory_timeout_in_seconds_);
 
             retry_cnt = 0;
 
             // These expect a upload_manager* as cbdata
             S3MultipartInitialHandler mpu_initial_handler
-                = { { s3_mpu_init_callback::response_properties, 
-                      s3_mpu_init_callback::response_complete }, 
-                    s3_mpu_init_callback::response };
+                = { { s3_multipart_upload::initialization_callback::response_properties,
+                      s3_multipart_upload::initialization_callback::response_complete },
+                    s3_multipart_upload::initialization_callback::response };
 
             do {
                 print_bucket_context(bucket_context_);
@@ -1501,7 +1499,8 @@ namespace irods::experimental::io
 
             if (debug_flag_) {
                 printf("%s:%d (%s) [[%d]] S3_initiate_multipart returned.  Upload ID = %s\n",
-                        __FILE__, __LINE__, __FUNCTION__, object_identifier_, shared_data->upload_id.c_str());
+                        __FILE__, __LINE__, __FUNCTION__, object_identifier_,
+                        shared_data->upload_id.c_str());
             }
             upload_manager_.remaining = 0;
             upload_manager_.offset  = 0;
@@ -1513,22 +1512,22 @@ namespace irods::experimental::io
         void mpu_cancel()
         {
             namespace bi = boost::interprocess;
-            namespace types = s3_transport_interprocess_types;
+            namespace types = interprocess_types;
 
             // read upload_id from shmem
             std::string shared_memory_name =  object_key_ + "-shm";
-            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 
-                    s3_transport_constants::MAX_S3_SHMEM_SIZE);
+            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(),
+                    constants::MAX_S3_SHMEM_SIZE);
 
             types::void_allocator alloc_inst(segment.get_segment_manager());
             multipart_shared_data *shared_data = get_shared_data_with_timeout(
-                    s3_transport_constants::MULTIPART_SHARED_DATA_NAME, alloc_inst, 
-                    segment, shared_memory_timeout_seconds_);
+                    constants::MULTIPART_SHARED_DATA_NAME, alloc_inst,
+                    segment, shared_memory_timeout_in_seconds_);
             std::string upload_id = shared_data->upload_id.c_str();
 
             S3AbortMultipartUploadHandler abort_handler
-                = { { s3_mpu_cancel_callback::response_properties, 
-                      s3_mpu_cancel_callback::response_completion } };
+                = { { s3_multipart_upload::cancel_callback::response_properties,
+                      s3_multipart_upload::cancel_callback::response_completion } };
 
             std::stringstream msg;
             S3Status status;
@@ -1538,11 +1537,11 @@ namespace irods::experimental::io
                     << object_key_ << "\", upload_id=\"" << upload_id << "\"";
                 printf( "%s\n", msg.str().c_str() );
             }
-            s3_mpu_cancel_callback::g_response_completion_status = S3StatusOK;
-            s3_mpu_cancel_callback::g_response_completion_saved_bucket_context = &bucket_context_;
+            s3_multipart_upload::cancel_callback::g_response_completion_status = S3StatusOK;
+            s3_multipart_upload::cancel_callback::g_response_completion_saved_bucket_context = &bucket_context_;
             S3_abort_multipart_upload(&bucket_context_, object_key_.c_str(),
                     upload_id.c_str(), &abort_handler);
-            status = s3_mpu_cancel_callback::g_response_completion_status;
+            status = s3_multipart_upload::cancel_callback::g_response_completion_status;
             if (status != S3StatusOK) {
                 msg.str( std::string() ); // Clear
                 msg << "] " << __FUNCTION__
@@ -1560,7 +1559,7 @@ namespace irods::experimental::io
         int complete_multipart_upload()
         {
             namespace bi = boost::interprocess;
-            namespace types = s3_transport_interprocess_types;
+            namespace types = interprocess_types;
 
             int result;
             std::stringstream msg;
@@ -1570,13 +1569,13 @@ namespace irods::experimental::io
 
             // read upload_id from shmem
             std::string shared_memory_name =  object_key_ + "-shm";
-            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 
-                    s3_transport_constants::MAX_S3_SHMEM_SIZE);
+            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(),
+                    constants::MAX_S3_SHMEM_SIZE);
 
             types::void_allocator alloc_inst(segment.get_segment_manager());
             multipart_shared_data *shared_data = get_shared_data_with_timeout(
-                    s3_transport_constants::MULTIPART_SHARED_DATA_NAME, alloc_inst, 
-                    segment, shared_memory_timeout_seconds_);
+                    constants::MULTIPART_SHARED_DATA_NAME, alloc_inst,
+                    segment, shared_memory_timeout_in_seconds_);
             std::string upload_id = shared_data->upload_id.c_str();
 
             if (0 == shared_data->last_irods_error_code) { // If someone aborted, don't complete...
@@ -1589,7 +1588,7 @@ namespace irods::experimental::io
 
                 int i;
                 xml << "<CompleteMultipartUpload>\n";
-                char buf[256];
+                char_type buf[256];
                 int n;
                 for ( i = 0; i < shared_data->etags.size(); i++ ) {
                     xml << "<Part><PartNumber>";
@@ -1604,9 +1603,9 @@ namespace irods::experimental::io
                 upload_manager_.offset = 0;
                 retry_cnt = 0;
                 S3MultipartCommitHandler commit_handler
-                    = { {s3_mpu_commit_callback::response_properties, 
-                         s3_mpu_commit_callback::response_completion }, 
-                        s3_mpu_commit_callback::response, nullptr };
+                    = { {s3_multipart_upload::commit_callback::response_properties,
+                         s3_multipart_upload::commit_callback::response_completion },
+                        s3_multipart_upload::commit_callback::response, nullptr };
                 do {
                     // On partial error, need to restart XML send from the beginning
                     upload_manager_.remaining = manager_remaining;
@@ -1649,44 +1648,44 @@ namespace irods::experimental::io
         } // end complete_multipart_upload
 
         // this function is called in the background in a separate thread
-        void s3_download_part_worker_routine(char *buffer, uint32_t length)
+        void s3_download_part_worker_routine(char_type *buffer, uint64_t length)
         {
             namespace bi = boost::interprocess;
-            namespace types = s3_transport_interprocess_types;
+            namespace types = interprocess_types;
 
             // read upload_id from shmem
             std::string shared_memory_name =  object_key_ + "-shm";
-            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 
-                    s3_transport_constants::MAX_S3_SHMEM_SIZE);
+            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(),
+                    constants::MAX_S3_SHMEM_SIZE);
 
             types::void_allocator alloc_inst(segment.get_segment_manager());
             multipart_shared_data *shared_data = get_shared_data_with_timeout(
-                    s3_transport_constants::MULTIPART_SHARED_DATA_NAME, alloc_inst, 
-                    segment, shared_memory_timeout_seconds_);
+                    constants::MULTIPART_SHARED_DATA_NAME, alloc_inst,
+                    segment, shared_memory_timeout_in_seconds_);
 
             std::stringstream msg;
 
             int retry_cnt = 0;
 
-            std::shared_ptr<s3_read_callback> read_callback_data;
+            std::shared_ptr<callback_for_read_from_s3<char_type>> read_callback_data;
 
             do {
 
-                S3GetObjectHandler get_object_handler = { 
-                    { 
-                        s3_read_callback::read_data_response_properties_callback, 
-                        s3_read_callback::read_data_response_completion_callback 
-                    }, 
-                    s3_read_callback::s3_read_data_callback_routine
+                S3GetObjectHandler get_object_handler = {
+                    {
+                        callback_for_read_from_s3<char_type>::response_properties_callback,
+                        callback_for_read_from_s3<char_type>::response_completion_callback
+                    },
+                    callback_for_read_from_s3<char_type>::invoke_callback
                 };
 
                 if (buffer == nullptr) {
-                    read_callback_data.reset(new s3_read_callback_to_cache(bucket_context_));
-                    static_cast<s3_read_callback_to_cache*>(read_callback_data.get())->cache_fd = cache_fd_;
+                    read_callback_data.reset(new callback_for_read_from_s3_to_cache<char_type>(bucket_context_));
+                    static_cast<callback_for_read_from_s3_to_cache<char_type>*>(read_callback_data.get())->cache_fd = cache_fd_;
                 } else {
-                    read_callback_data.reset(new s3_read_callback_to_buffer(bucket_context_));
-                    static_cast<s3_read_callback_to_buffer*>(read_callback_data.get())->output_buffer = buffer;
-                    static_cast<s3_read_callback_to_buffer*>(read_callback_data.get())->output_buffer_size = length;
+                    read_callback_data.reset(new callback_for_read_from_buffer<char_type>(bucket_context_));
+                    static_cast<callback_for_read_from_buffer<char_type>*>(read_callback_data.get())->output_buffer = buffer;
+                    static_cast<callback_for_read_from_buffer<char_type>*>(read_callback_data.get())->output_buffer_size = length;
 
                 }
                 read_callback_data->content_length = length;
@@ -1696,17 +1695,17 @@ namespace irods::experimental::io
                 if (debug_flag_) {
                     msg.str( std::string() ); // Clear
                     msg << "Multirange:  Start range key \"" << object_key_ << "\", offset "
-                        << (long)read_callback_data->offset << ", len " 
+                        << (long)read_callback_data->offset << ", len "
                         << (int)read_callback_data->content_length;
-                    printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, 
+                    printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_,
                             msg.str().c_str());
                 }
 
                 unsigned long long usStart = usNow();
                 print_bucket_context(bucket_context_);
-                S3_get_object( &bucket_context_, object_key_.c_str(), NULL, 
+                S3_get_object( &bucket_context_, object_key_.c_str(), NULL,
                         file_offset_,
-                        read_callback_data->content_length, 0, 
+                        read_callback_data->content_length, 0,
                         &get_object_handler, read_callback_data.get() );
 
                 if (debug_flag_) {
@@ -1714,12 +1713,14 @@ namespace irods::experimental::io
                     double bw = (read_callback_data->content_length / (1024.0*1024.0)) /
                         ( (usEnd - usStart) / 1000000.0 );
                     msg << " -- END -- BW=" << bw << " MB/s";
-                    printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, msg.str().c_str());
+                    printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__,
+                            object_identifier_, msg.str().c_str());
                 }
 
                 if (read_callback_data->status != S3StatusOK) s3_sleep( retry_wait_seconds_, 0 );
 
-            } while ((read_callback_data->status != S3StatusOK) && S3_status_is_retryable(read_callback_data->status) 
+            } while ((read_callback_data->status != S3StatusOK)
+                    && S3_status_is_retryable(read_callback_data->status)
                     && (++retry_cnt < retry_count_limit_));
 
             if (read_callback_data->status != S3StatusOK) {
@@ -1728,7 +1729,8 @@ namespace irods::experimental::io
                 if (read_callback_data->status >= 0) {
                     msg << " - \"" << S3_get_status_name( read_callback_data->status ) << "\"";
                 }
-                printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, msg.str().c_str());
+                printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__,
+                        object_identifier_, msg.str().c_str());
             }
 
             if (read_callback_data->status != S3StatusOK) {
@@ -1738,15 +1740,15 @@ namespace irods::experimental::io
         } // end s3_download_part_worker_routine
 
         // this function is called in the background in a separate thread
-        void s3_upload_part_worker_routine() 
+        void s3_upload_part_worker_routine()
         {
             namespace bi = boost::interprocess;
-            namespace types = s3_transport_interprocess_types;
+            namespace types = interprocess_types;
 
             // read upload_id from shmem
             std::string shared_memory_name =  object_key_ + "-shm";
-            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(), 
-                    s3_transport_constants::MAX_S3_SHMEM_SIZE);
+            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(),
+                    constants::MAX_S3_SHMEM_SIZE);
 
             types::void_allocator alloc_inst(segment.get_segment_manager());
             std::string mtx_name = object_key_ + "-mtx";
@@ -1757,19 +1759,19 @@ namespace irods::experimental::io
                 bi::scoped_lock<bi::named_mutex> lock(named_mtx);
                 //scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__, object_identifier_);
                 multipart_shared_data *shared_data = get_shared_data_with_timeout(
-                        s3_transport_constants::MULTIPART_SHARED_DATA_NAME, alloc_inst, 
-                        segment, shared_memory_timeout_seconds_);
+                        constants::MULTIPART_SHARED_DATA_NAME, alloc_inst,
+                        segment, shared_memory_timeout_in_seconds_);
                 upload_id = shared_data->upload_id.c_str();
             }
 
             std::stringstream msg;
             S3PutObjectHandler putObjectHandler
-                = { {s3_mpu_part_callback::response_properties, 
-                     s3_mpu_part_callback::response_completion }, 
-                    &s3_mpu_part_callback::put_data };
+                = { {s3_multipart_upload::part_transport_callback::response_properties<char_type>,
+                     s3_multipart_upload::part_transport_callback::response_completion<char_type> },
+                    &s3_multipart_upload::part_transport_callback::put_data<char_type> };
 
             multipart_data partData{upload_manager_, bucket_context_, circular_buffer_};
-            upload_page page;
+            upload_page<char_type> page;
 
             // read the first page
             if (debug_flag_) {
@@ -1791,16 +1793,16 @@ namespace irods::experimental::io
             // estimate the size and resize the etags vector
             int number_of_parts = object_size_ / part_size_;
             number_of_parts = number_of_parts < sequence ? sequence : number_of_parts;
-      
-            // resize the etags vector if necessary 
-            {  
+
+            // resize the etags vector if necessary
+            {
                 bi::named_mutex named_mtx{bi::open_or_create, mtx_name.c_str()};
                 bi::scoped_lock<bi::named_mutex> lock(named_mtx);
                 //scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__, object_identifier_);
 
                 multipart_shared_data *shared_data = get_shared_data_with_timeout(
-                        s3_transport_constants::MULTIPART_SHARED_DATA_NAME, alloc_inst, 
-                        segment, shared_memory_timeout_seconds_);
+                        constants::MULTIPART_SHARED_DATA_NAME, alloc_inst,
+                        segment, shared_memory_timeout_in_seconds_);
 
                 if (number_of_parts > shared_data->etags.size()) {
                     try {
@@ -1822,8 +1824,8 @@ namespace irods::experimental::io
                 partData.server_encrypt = mpu_data_.server_encrypt;
                 partData.object_identifier = mpu_data_.object_identifier;
                 partData.debug_flag = debug_flag_;
-                partData.seq = sequence;
-                partData.shared_memory_timeout_seconds = shared_memory_timeout_seconds_;
+                partData.sequence = sequence;
+                partData.shared_memory_timeout_in_seconds = shared_memory_timeout_in_seconds_;
                 partData.put_object_data.saved_bucket_context = bucket_context_;
                 partData.put_object_data.buffer = page.buffer;
                 partData.put_object_data.content_length = part_size_;
@@ -1865,7 +1867,7 @@ namespace irods::experimental::io
                 }
 
                 unsigned long long usEnd = usNow();
-                //double bw = (mpu_data_[seq-1].put_object_data.content_length /
+                //double bw = (mpu_data_[sequence-1].put_object_data.content_length /
                 //   (1024.0 * 1024.0)) /
                 //   ( (usEnd - usStart) / 1000000.0 );
                 if (debug_flag_) {
@@ -1883,17 +1885,17 @@ namespace irods::experimental::io
                 bi::scoped_lock<bi::named_mutex> lock(named_mtx);
                 //scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__, object_identifier_);
                 multipart_shared_data *shared_data = get_shared_data_with_timeout(
-                        s3_transport_constants::MULTIPART_SHARED_DATA_NAME, alloc_inst, 
-                        segment, shared_memory_timeout_seconds_);
+                        constants::MULTIPART_SHARED_DATA_NAME, alloc_inst,
+                        segment, shared_memory_timeout_in_seconds_);
                 shared_data->last_irods_error_code = S3_PUT_ERROR;
             }
         }
 
         int                       fd_;
         nlohmann::json            fd_info_;
-        uint32_t                  object_size_;
+        uint64_t                  object_size_;
         int                       number_of_transfer_threads_;
-        uint32_t                  part_size_;
+        uint64_t                  part_size_;
         int                       retry_count_limit_;
         int                       retry_wait_seconds_;
         std::string               hostname_;
@@ -1905,17 +1907,17 @@ namespace irods::experimental::io
         upload_manager            upload_manager_;
         S3SignatureVersion        s3_signature_version_;
 
-        time_t                    shared_memory_timeout_seconds_;
+        time_t                    shared_memory_timeout_in_seconds_;
         bool                      enable_md5_flag_;
         bool                      server_encrypt_flag_;
 
         bool                      debug_flag_;
-        multipart_data            mpu_data_;
+        multipart_data<char_type> mpu_data_;
         bool                      call_s3_upload_part_flag_;
         bool                      call_s3_download_part_flag_;
         S3PutProperties           put_props_;
 
-        irods::experimental::circular_buffer<upload_page>
+        irods::experimental::circular_buffer<upload_page<char_type>>
                                   circular_buffer_;
         std::thread               *begin_part_upload_thread_ptr_;
 
