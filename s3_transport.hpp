@@ -42,7 +42,7 @@
 #include <boost/filesystem.hpp>
 
 // local includes
-#include "scoped_lock_test.hpp"
+#include "scoped_lock.hpp"
 
 // TODO move all into s3_transport class
 // TODO char_type and buffer_type
@@ -104,18 +104,24 @@ namespace irods::experimental::io::s3_transport
 
         const std::string MULTIPART_SHARED_DATA_NAME{"SharedData"};
         const int         DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS{900};
+        const std::string MULTIPART_SHARED_MEMORY_EXTENSION{"-shm"};
     }
 
-
-
-    multipart_shared_data *get_shared_data_with_timeout(const std::string& key,
-                                                        interprocess_types::void_allocator& alloc_inst,
-                                                        boost::interprocess::managed_shared_memory& segment,
+    multipart_shared_data *get_shared_data_with_timeout(std::string object_key,
                                                         time_t shared_memory_timeout_in_seconds)
     {
+        namespace bi = boost::interprocess;
+        namespace types = interprocess_types;
+
+        std::string shared_memory_name =  object_key + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
+
+        static bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(),
+                constants::MAX_S3_SHMEM_SIZE);
+
+         types::void_allocator alloc_inst(segment.get_segment_manager());
 
         multipart_shared_data *shared_data = segment.find_or_construct<multipart_shared_data>
-            (key.c_str())(alloc_inst);
+            (constants::MULTIPART_SHARED_DATA_NAME.c_str())(alloc_inst);
 
         const time_t now = time(0);
 
@@ -440,25 +446,16 @@ namespace irods::experimental::io::s3_transport
             S3Status response (const char* upload_id,
                                void *callback_data )
             {
-                namespace bi = boost::interprocess;
-                namespace types = interprocess_types;
+                // upload upload_id in shared memory
+                // no need to lock as this should already be locked
 
                 upload_manager *manager = (upload_manager *)callback_data;
 
                 // upload upload_id in shared memory
                 std::string& object_key = manager->object_key;
 
-                std::string shared_memory_name =  object_key + "-shm";
-
-                bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(),
-                        constants::MAX_S3_SHMEM_SIZE);
-
-                types::void_allocator alloc_inst(segment.get_segment_manager());
-
-                // no need to lock as this should already be locked
-                multipart_shared_data *shared_data = get_shared_data_with_timeout(
-                        constants::MULTIPART_SHARED_DATA_NAME, alloc_inst,
-                        segment, manager->shared_memory_timeout_in_seconds);
+                multipart_shared_data *shared_data = get_shared_data_with_timeout(object_key,
+                        manager->shared_memory_timeout_in_seconds);
 
                 shared_data->upload_id = upload_id;
 
@@ -593,28 +590,24 @@ namespace irods::experimental::io::s3_transport
                 namespace bi = boost::interprocess;
                 namespace types = interprocess_types;
 
-                //TODO reduce this boilerplate
 
                 multipart_data<CharT> *data = (multipart_data<CharT> *)callback_data;
 
                 const auto& object_key = static_cast<upload_manager&>(data->manager).object_key;
 
-                auto shared_memory_name =  object_key + "-shm";
+                auto shared_memory_name =  object_key + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
                 bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(),
                         constants::MAX_S3_SHMEM_SIZE);
 
                 types::void_allocator alloc_inst(segment.get_segment_manager());
 
                 // lock for update
-                auto mtx_name = object_key + "-mtx";
-                bi::named_mutex named_mtx{bi::open_or_create, mtx_name.c_str()};
-                bi::scoped_lock<bi::named_mutex> lock(named_mtx);
-                //scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__, data->object_identifier);
+                scoped_lock sl(object_key);
 
                 auto object_identifier = data->object_identifier;
-                multipart_shared_data *shared_data = get_shared_data_with_timeout(
-                        constants::MULTIPART_SHARED_DATA_NAME, alloc_inst,
-                        segment, data->shared_memory_timeout_in_seconds);
+                multipart_shared_data *shared_data = get_shared_data_with_timeout(object_key,
+                        data->shared_memory_timeout_in_seconds);
+
                 auto sequence = data->sequence;
                 const char *etag = properties->eTag;
 
@@ -923,11 +916,6 @@ namespace irods::experimental::io::s3_transport
 
             fd_ = uninitialized_file_descriptor;
 
-            std::string shared_memory_name =  object_key_ + "-shm";
-            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(),
-                    constants::MAX_S3_SHMEM_SIZE);
-
-            types::void_allocator alloc_inst(segment.get_segment_manager());
             int open_flags = populate_open_mode_flags();
 
             // if it is a full multpart upload, wait for the upload to complete
@@ -958,13 +946,10 @@ namespace irods::experimental::io::s3_transport
             bi::named_mutex named_mtx{bi::open_or_create, mtx_name.c_str()};
             // TODO rename to shared_memory_lock - or is this used for other things as well?
 
-            // TODO alias bi::scoped_lock<bi::named_mutex>
-            bi::scoped_lock<bi::named_mutex> lock(named_mtx);
-            //scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__, object_identifier_);
+            scoped_lock lock(object_key_);
 
-            multipart_shared_data *shared_data = get_shared_data_with_timeout(
-                    constants::MULTIPART_SHARED_DATA_NAME, alloc_inst,
-                    segment, shared_memory_timeout_in_seconds_);
+            multipart_shared_data *shared_data = get_shared_data_with_timeout(object_key_,
+                    shared_memory_timeout_in_seconds_);
 
             // TODO add generic interface to shared memory with locking
             int file_open_cntr = --(shared_data->file_open_cntr);
@@ -979,7 +964,7 @@ namespace irods::experimental::io::s3_transport
 
                     bf::path cache_file =  bf::path(cache_directory_) / bf::path(object_key_ + "-cache");
 
-                    // if we don't unlock here, the threads will try to obtain the same
+                    // if we don't nlock here, the threads will try to obtain the same
                     // lock during download so we must temporarily unlock
                     lock.unlock();
 
@@ -1160,7 +1145,7 @@ namespace irods::experimental::io::s3_transport
         {
             namespace bi = boost::interprocess;
 
-            std::string shared_memory_name =  object_key_ + "-shm";
+            auto shared_memory_name =  object_key_ + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
             std::string mtx_name = object_key_ + "-mtx";
 
             bi::shared_memory_object::remove(shared_memory_name.c_str());
@@ -1273,21 +1258,11 @@ namespace irods::experimental::io::s3_transport
 //            }
 
 
-            std::string shared_memory_name =  object_key_ + "-shm";
-            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(),
-                    constants::MAX_S3_SHMEM_SIZE);
-
-            types::void_allocator alloc_inst(segment.get_segment_manager());
-
             // lock shared data for updates
-            std::string mtx_name = object_key_ + "-mtx";
-            bi::named_mutex named_mtx{bi::open_or_create, mtx_name.c_str()};
-            bi::scoped_lock<bi::named_mutex> lock(named_mtx);
-            //scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__, object_identifier_);
+            scoped_lock lock(object_key_);
 
-            multipart_shared_data *shared_data = get_shared_data_with_timeout(
-                    constants::MULTIPART_SHARED_DATA_NAME, alloc_inst,
-                    segment, shared_memory_timeout_in_seconds_);
+            multipart_shared_data *shared_data = get_shared_data_with_timeout(object_key_,
+                    shared_memory_timeout_in_seconds_);
 
             ++(shared_data->file_open_cntr);
 
@@ -1462,14 +1437,8 @@ namespace irods::experimental::io::s3_transport
             data.object_identifier = object_identifier_;
 
             // read shared memory entry for this key (shmem already locked here)
-            std::string shared_memory_name =  object_key_ + "-shm";
-            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(),
-                    constants::MAX_S3_SHMEM_SIZE);
-
-            types::void_allocator alloc_inst(segment.get_segment_manager());
-            multipart_shared_data *shared_data = get_shared_data_with_timeout(
-                    constants::MULTIPART_SHARED_DATA_NAME, alloc_inst,
-                    segment, shared_memory_timeout_in_seconds_);
+            multipart_shared_data *shared_data = get_shared_data_with_timeout(object_key_,
+                    shared_memory_timeout_in_seconds_);
 
             retry_cnt = 0;
 
@@ -1515,14 +1484,8 @@ namespace irods::experimental::io::s3_transport
             namespace types = interprocess_types;
 
             // read upload_id from shmem
-            std::string shared_memory_name =  object_key_ + "-shm";
-            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(),
-                    constants::MAX_S3_SHMEM_SIZE);
-
-            types::void_allocator alloc_inst(segment.get_segment_manager());
-            multipart_shared_data *shared_data = get_shared_data_with_timeout(
-                    constants::MULTIPART_SHARED_DATA_NAME, alloc_inst,
-                    segment, shared_memory_timeout_in_seconds_);
+            multipart_shared_data *shared_data = get_shared_data_with_timeout(object_key_,
+                    shared_memory_timeout_in_seconds_);
             std::string upload_id = shared_data->upload_id.c_str();
 
             S3AbortMultipartUploadHandler abort_handler
@@ -1568,14 +1531,14 @@ namespace irods::experimental::io::s3_transport
             std::stringstream xml("");
 
             // read upload_id from shmem
-            std::string shared_memory_name =  object_key_ + "-shm";
+            // TODO for some reason to create a segment here
+            auto shared_memory_name =  object_key_ + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
             bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(),
                     constants::MAX_S3_SHMEM_SIZE);
 
             types::void_allocator alloc_inst(segment.get_segment_manager());
-            multipart_shared_data *shared_data = get_shared_data_with_timeout(
-                    constants::MULTIPART_SHARED_DATA_NAME, alloc_inst,
-                    segment, shared_memory_timeout_in_seconds_);
+            multipart_shared_data *shared_data = get_shared_data_with_timeout(object_key_,
+                    shared_memory_timeout_in_seconds_);
             std::string upload_id = shared_data->upload_id.c_str();
 
             if (0 == shared_data->last_irods_error_code) { // If someone aborted, don't complete...
@@ -1654,14 +1617,8 @@ namespace irods::experimental::io::s3_transport
             namespace types = interprocess_types;
 
             // read upload_id from shmem
-            std::string shared_memory_name =  object_key_ + "-shm";
-            bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(),
-                    constants::MAX_S3_SHMEM_SIZE);
-
-            types::void_allocator alloc_inst(segment.get_segment_manager());
-            multipart_shared_data *shared_data = get_shared_data_with_timeout(
-                    constants::MULTIPART_SHARED_DATA_NAME, alloc_inst,
-                    segment, shared_memory_timeout_in_seconds_);
+            multipart_shared_data *shared_data = get_shared_data_with_timeout(object_key_,
+                    shared_memory_timeout_in_seconds_);
 
             std::stringstream msg;
 
@@ -1746,21 +1703,19 @@ namespace irods::experimental::io::s3_transport
             namespace types = interprocess_types;
 
             // read upload_id from shmem
-            std::string shared_memory_name =  object_key_ + "-shm";
+            auto shared_memory_name =  object_key_ + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
             bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(),
                     constants::MAX_S3_SHMEM_SIZE);
 
             types::void_allocator alloc_inst(segment.get_segment_manager());
             std::string mtx_name = object_key_ + "-mtx";
 
+
             std::string upload_id;
             {
-                bi::named_mutex named_mtx{bi::open_or_create, mtx_name.c_str()};
-                bi::scoped_lock<bi::named_mutex> lock(named_mtx);
-                //scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__, object_identifier_);
-                multipart_shared_data *shared_data = get_shared_data_with_timeout(
-                        constants::MULTIPART_SHARED_DATA_NAME, alloc_inst,
-                        segment, shared_memory_timeout_in_seconds_);
+                scoped_lock lock(object_key_);
+                multipart_shared_data *shared_data = get_shared_data_with_timeout(object_key_,
+                        shared_memory_timeout_in_seconds_);
                 upload_id = shared_data->upload_id.c_str();
             }
 
@@ -1796,13 +1751,10 @@ namespace irods::experimental::io::s3_transport
 
             // resize the etags vector if necessary
             {
-                bi::named_mutex named_mtx{bi::open_or_create, mtx_name.c_str()};
-                bi::scoped_lock<bi::named_mutex> lock(named_mtx);
-                //scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__, object_identifier_);
+                scoped_lock lock(object_key_);
 
-                multipart_shared_data *shared_data = get_shared_data_with_timeout(
-                        constants::MULTIPART_SHARED_DATA_NAME, alloc_inst,
-                        segment, shared_memory_timeout_in_seconds_);
+                multipart_shared_data *shared_data = get_shared_data_with_timeout(object_key_,
+                        shared_memory_timeout_in_seconds_);
 
                 if (number_of_parts > shared_data->etags.size()) {
                     try {
@@ -1881,12 +1833,11 @@ namespace irods::experimental::io::s3_transport
                     (++retry_cnt < retry_count_limit_));
 
             if (partData.status != S3StatusOK) {
-                bi::named_mutex named_mtx{bi::open_or_create, mtx_name.c_str()};
-                bi::scoped_lock<bi::named_mutex> lock(named_mtx);
-                //scoped_lock_test sl(mtx_name, __FILE__, __LINE__, __FUNCTION__, object_identifier_);
-                multipart_shared_data *shared_data = get_shared_data_with_timeout(
-                        constants::MULTIPART_SHARED_DATA_NAME, alloc_inst,
-                        segment, shared_memory_timeout_in_seconds_);
+
+                scoped_lock lock(object_key_);
+
+                multipart_shared_data *shared_data = get_shared_data_with_timeout(object_key_,
+                        shared_memory_timeout_in_seconds_);
                 shared_data->last_irods_error_code = S3_PUT_ERROR;
             }
         }
