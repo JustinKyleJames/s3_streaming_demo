@@ -352,7 +352,6 @@ void upload_part(int thread_number,
     s3_config.object_identifier = thread_number;
     s3_config.debug_flag = debug_flag;
 
-    // TODO look at encapsulate the args in a struct
     s3_transport tp1{s3_config};
     odstream ds1{tp1, filename};
     ds1.seekp(start);
