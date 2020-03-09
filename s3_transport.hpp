@@ -45,7 +45,6 @@
 #include "scoped_lock.hpp"
 
 // TODO move all into s3_transport class
-// TODO remove c-style casts
 
 namespace irods::experimental::io::s3_transport
 {
@@ -74,7 +73,7 @@ namespace irods::experimental::io::s3_transport
 
         multipart_shared_data(const interprocess_types::void_allocator &allocator)
             : last_access_time_in_seconds{time(nullptr)}
-            , file_open_cntr{0}
+            , file_open_counter{0}
             , upload_id{allocator}
             , etags{allocator}
             , last_irods_error_code{0}
@@ -83,7 +82,7 @@ namespace irods::experimental::io::s3_transport
         {}
 
         time_t                                last_access_time_in_seconds;     // timeout for shmem
-        int                                   file_open_cntr;
+        int                                   file_open_counter;
         interprocess_types::shm_char_string   upload_id;
         interprocess_types::shm_string_vector etags;
         int                                   last_irods_error_code;
@@ -130,7 +129,7 @@ namespace irods::experimental::io::s3_transport
 
             // reset the fields
             shared_data->last_access_time_in_seconds = now;
-            shared_data->file_open_cntr = 0;
+            shared_data->file_open_counter = 0;
             shared_data->upload_id = "";
             shared_data->etags.clear();
             shared_data->last_irods_error_code = 0;
@@ -171,7 +170,7 @@ namespace irods::experimental::io::s3_transport
 
         pStatus = status;
         if( debug_flag || status != S3StatusOK ) {
-            printf( "  S3Status: [%s] - %d\n", S3_get_status_name( status ), (int) status );
+            printf( "  S3Status: [%s] - %d\n", S3_get_status_name( status ), static_cast<int>(status) );
             printf( "    S3Host: %s\n", saved_bucket_context.hostName );
         }
 
@@ -201,7 +200,7 @@ namespace irods::experimental::io::s3_transport
        bool               terminate_flag;
     };
 
-    // TODO how is this used?  remove?
+    // TODO how is this used?  remove?  keep for now until stat is implemented
     struct s3_stat
     {
         std::string key;
@@ -256,26 +255,26 @@ namespace irods::experimental::io::s3_transport
             {}
 
             virtual S3Status callback_implementation(int libs3_buffer_size,
-                                                const char_type *libs3_buffer) = 0;
+                                                     const char_type *libs3_buffer) = 0;
 
             static S3Status invoke_callback(int libs3_buffer_size,
-                                                          const char_type *libs3_buffer,
-                                                          void *callback_data)
+                                            const char_type *libs3_buffer,
+                                            void *callback_data)
             {
                 callback_for_read_from_s3 *data = (callback_for_read_from_s3*)callback_data;
                 return data->callback_implementation(libs3_buffer_size, libs3_buffer);
             }
 
             static S3Status response_properties_callback(const S3ResponseProperties *properties,
-                                                                   void *callback_data)
+                                                         void *callback_data)
             {
                 // Don't need to do anything here
                 return S3StatusOK;
             }
 
             static void response_completion_callback (S3Status status,
-                                                                const S3ErrorDetails *error,
-                                                                void *callback_data)
+                                                      const S3ErrorDetails *error,
+                                                      void *callback_data)
             {
                 callback_for_read_from_s3 *data = (callback_for_read_from_s3*)callback_data;
                 store_and_log_status( status, error, __FUNCTION__, data->saved_bucket_context, data->status,
@@ -309,7 +308,7 @@ namespace irods::experimental::io::s3_transport
             {}
 
             S3Status callback_implementation(int libs3_buffer_size,
-                                        const char_type *libs3_buffer)
+                                             const char_type *libs3_buffer)
             {
 
                 // writing output to cache file
@@ -342,13 +341,12 @@ namespace irods::experimental::io::s3_transport
             {}
 
             S3Status callback_implementation(int libs3_buffer_size,
-                                        const char_type *libs3_buffer)
+                                             const char_type *libs3_buffer)
             {
                 // writing to buffer
 
                 // TODO type?
-                int bytes_to_write = //libs3_buffer_size;
-                      this->offset + libs3_buffer_size > output_buffer_size
+                auto bytes_to_write = this->offset + libs3_buffer_size > output_buffer_size
                     ? output_buffer_size - this->offset
                     : libs3_buffer_size;
 
@@ -356,7 +354,7 @@ namespace irods::experimental::io::s3_transport
 
                 this->offset += bytes_to_write;
 
-                return ((bytes_to_write < (ssize_t) libs3_buffer_size) ?
+                return ((bytes_to_write < static_cast<ssize_t>(libs3_buffer_size)) ?
                         S3StatusAbortedByCallback : S3StatusOK);
 
             }
@@ -484,22 +482,22 @@ namespace irods::experimental::io::s3_transport
         /* Uploading the multipart completion XML from our buffer */
         namespace commit_callback
         {
-            int response (int bufferSize,
+            int response (int buffer_size,
                           libs3_buffer_type buffer,
                           void *callback_data)
             {
                 upload_manager *manager = (upload_manager *)callback_data;
                 long ret = 0;
                 if (manager->remaining) {
-                    int toRead = ((manager->remaining > bufferSize) ?
-                                  bufferSize : manager->remaining);
-                    memcpy(buffer, manager->xml.c_str() + manager->offset, toRead);
-                    ret = toRead;
+                    int to_read_count = ((manager->remaining > buffer_size) ?
+                                  buffer_size : manager->remaining);
+                    memcpy(buffer, manager->xml.c_str() + manager->offset, to_read_count);
+                    ret = to_read_count;
                 }
                 manager->remaining -= ret;
                 manager->offset += ret;
 
-                return (int)ret;
+                return static_cast<int>(ret);
             } // end commit
 
             S3Status response_properties (const S3ResponseProperties *properties,
@@ -532,7 +530,7 @@ namespace irods::experimental::io::s3_transport
             {
                 data_for_write_callback<buffer_type>& data = (static_cast<multipart_data<buffer_type>*>(callback_data))->put_object_data;
 
-                // keep reading a bufferSize bytes from buffer.
+                // keep reading a buffer_size bytes from buffer.
                 // if buffer is empty, get another from the circular_buffer
                 irods::experimental::circular_buffer<upload_page<buffer_type>>& circular_buffer =
                     data.circular_buffer;
@@ -602,7 +600,7 @@ namespace irods::experimental::io::s3_transport
                 types::void_allocator alloc_inst(segment.get_segment_manager());
 
                 // shared_memory_lock for update
-                scoped_lock sl(object_key);
+                scoped_lock shared_memory_lock(object_key);
 
                 auto object_identifier = data->object_identifier;
                 multipart_shared_data *shared_data = get_shared_data_with_timeout(object_key,
@@ -687,7 +685,7 @@ namespace irods::experimental::io::s3_transport
         int random = rand();
         rand_mutex.unlock();
         // Add up to 1000 ms (1 sec)
-        int addl = (int)(((double)random / (double)RAND_MAX) * 1000.0);
+        int addl = static_cast<int>((static_cast<double>(random) / static_cast<double>(RAND_MAX)) * 1000.0);
         useconds_t us = ( _s * 1000000 ) + ( (_ms + addl) * 1000 );
         usleep( us );
     } // end s3_sleep
@@ -944,9 +942,9 @@ namespace irods::experimental::io::s3_transport
                     shared_memory_timeout_in_seconds_);
 
             // TODO add generic interface to shared memory with locking
-            int file_open_cntr = --(shared_data->file_open_cntr);
+            int file_open_counter = --(shared_data->file_open_counter);
 
-            if (file_open_cntr == 0) {
+            if (file_open_counter == 0) {
 
                 if (use_cache_) {
 
@@ -956,7 +954,7 @@ namespace irods::experimental::io::s3_transport
 
                     bf::path cache_file =  bf::path(cache_directory_) / bf::path(object_key_ + "-cache");
 
-                    // if we don't nlock here, the threads will try to obtain the same
+                    // if we don't unlock here, the threads will try to obtain the same
                     // shared_memory_lock during download so we must temporarily unlock
                     shared_memory_lock.unlock();
 
@@ -1012,9 +1010,9 @@ namespace irods::experimental::io::s3_transport
             }
 
             if (debug_flag_) {
-                printf("%s:%d (%s) [[%d]] [file_open_cntr=%d]\n",
+                printf("%s:%d (%s) [[%d]] [file_open_counter=%d]\n",
                         __FILE__, __LINE__, __FUNCTION__, object_identifier_,
-                        file_open_cntr);
+                        file_open_counter);
             }
 
             return true;
@@ -1255,7 +1253,7 @@ namespace irods::experimental::io::s3_transport
             multipart_shared_data *shared_data = get_shared_data_with_timeout(object_key_,
                     shared_memory_timeout_in_seconds_);
 
-            ++(shared_data->file_open_cntr);
+            ++(shared_data->file_open_counter);
 
             // each process must intitialize S3
             if (s3_initialized_counter_ == 0) {
@@ -1351,7 +1349,7 @@ namespace irods::experimental::io::s3_transport
                 if (multipart_flag_) {
 
                     // first one in initiates the multipart (everyone has same shared_memory_lock)
-                    if (shared_data->last_irods_error_code >= 0 && shared_data->file_open_cntr == 1) {
+                    if (shared_data->last_irods_error_code >= 0 && shared_data->file_open_counter == 1) {
 
                         // send initiate message to S3
                         int ret = initiate_multipart_upload();
@@ -1643,8 +1641,8 @@ namespace irods::experimental::io::s3_transport
                 if (debug_flag_) {
                     msg.str( std::string() ); // Clear
                     msg << "Multirange:  Start range key \"" << object_key_ << "\", offset "
-                        << (long)read_callback_data->offset << ", len "
-                        << (int)read_callback_data->content_length;
+                        << static_cast<long>(read_callback_data->offset) << ", len "
+                        << static_cast<int>(read_callback_data->content_length);
                     printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_,
                             msg.str().c_str());
                 }
@@ -1776,9 +1774,9 @@ namespace irods::experimental::io::s3_transport
 
                 if (debug_flag_) {
                     std::stringstream msg;
-                    msg << "Multipart:  Start part " << (int)sequence << ", key \""
+                    msg << "Multipart:  Start part " << static_cast<int>(sequence) << ", key \""
                         << object_key_ << "\", uploadid \"" << upload_id
-                        << "\", len " << (int)partData.put_object_data.content_length;
+                        << "\", len " << static_cast<int>(partData.put_object_data.content_length);
                     printf( "%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_,
                             msg.str().c_str() );
                 }
