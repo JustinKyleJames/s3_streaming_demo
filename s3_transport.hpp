@@ -42,7 +42,8 @@
 #include <boost/filesystem.hpp>
 
 // local includes
-#include "scoped_lock.hpp"
+//#include "scoped_lock.hpp"
+#include "shared_memory_object.hpp"
 
 // TODO move all into s3_transport class
 
@@ -66,12 +67,11 @@ namespace irods::experimental::io::s3_transport
         using shm_string_vector     = bi::vector<shm_char_string, char_string_allocator>;
     }
 
-
     // data that needs to be shared among different processes
     struct multipart_shared_data
     {
 
-        multipart_shared_data(const interprocess_types::void_allocator &allocator)
+        /*multipart_shared_data(const interprocess_types::void_allocator &allocator)
             : last_access_time_in_seconds{time(nullptr)}
             , file_open_counter{0}
             , upload_id{allocator}
@@ -81,6 +81,26 @@ namespace irods::experimental::io::s3_transport
             , cache_file_download_completed_flag{false}
         {}
 
+        void reset_fields(time_t now)
+        {
+            scoped_lock shared_memory_lock(object_key);
+
+            shared_data->last_access_time_in_seconds = now;
+            shared_data->file_open_counter = 0;
+            shared_data->upload_id = "";
+            shared_data->etags.clear();
+            shared_data->last_irods_error_code = 0;
+            shared_data->cache_file_download_started_flag = false;
+            shared_data->cache_file_download_completed_flag = false;
+        }
+
+        template <typename Function>
+        auto atomic_exec(Function _func) const
+        {
+            scoped_lock shared_memory_lock(object_key);
+            return _func(object_->thing);
+        }*/
+
         time_t                                last_access_time_in_seconds;     // timeout for shmem
         int                                   file_open_counter;
         interprocess_types::shm_char_string   upload_id;
@@ -88,6 +108,13 @@ namespace irods::experimental::io::s3_transport
         int                                   last_irods_error_code;
         bool                                  cache_file_download_started_flag;
         bool                                  cache_file_download_completed_flag;
+
+        /*int adjust_file_open_counter(int offset)
+        {
+            scoped_lock shared_memory_lock(object_key);
+            return file_open_counter + offset;
+        }*/
+
     };
 
     namespace constants
@@ -104,7 +131,7 @@ namespace irods::experimental::io::s3_transport
         const std::string MULTIPART_SHARED_MEMORY_EXTENSION{"-shm"};
     }
 
-    multipart_shared_data *get_shared_data_with_timeout(std::string object_key,
+    /*multipart_shared_data *get_shared_data_with_timeout(std::string object_key,
                                                         time_t shared_memory_timeout_in_seconds)
     {
         namespace bi = boost::interprocess;
@@ -115,33 +142,24 @@ namespace irods::experimental::io::s3_transport
         static bi::managed_shared_memory segment(bi::open_or_create, shared_memory_name.c_str(),
                 constants::MAX_S3_SHMEM_SIZE);
 
-         types::void_allocator alloc_inst(segment.get_segment_manager());
+        types::void_allocator alloc_inst(segment.get_segment_manager());
 
         multipart_shared_data *shared_data = segment.find_or_construct<multipart_shared_data>
             (constants::MULTIPART_SHARED_DATA_NAME.c_str())(alloc_inst);
 
         const time_t now = time(0);
 
-        const bool shmem_has_expired = now - shared_data->last_access_time_in_seconds
+        const bool shmem_has_expired = now - shared_data->get_last_access_time_in_seconds()
             > shared_memory_timeout_in_seconds;
 
         if (shmem_has_expired) {
-
-            // reset the fields
-            shared_data->last_access_time_in_seconds = now;
-            shared_data->file_open_counter = 0;
-            shared_data->upload_id = "";
-            shared_data->etags.clear();
-            shared_data->last_irods_error_code = 0;
-            shared_data->cache_file_download_started_flag = false;
-            shared_data->cache_file_download_completed_flag = false;
-
+            shared_data->reset_fields(now);
         } else {
-            shared_data->last_access_time_in_seconds = now;
+            shared_data->set_last_access_time_in_seconds(now);
         }
 
         return shared_data;
-    }
+    }*/
 
 
     void print_bucket_context(const S3BucketContext& bucket_context)
