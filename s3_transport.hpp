@@ -42,7 +42,7 @@
 #include <boost/filesystem.hpp>
 
 // local includes
-//#include "scoped_lock.hpp"
+#include "scoped_lock.hpp"  // TODO remove
 #include "shared_memory_object.hpp"
 
 // TODO move all into s3_transport class
@@ -463,6 +463,8 @@ namespace irods::experimental::io::s3_transport
             S3Status response (const libs3_char_type* upload_id,
                                void *callback_data )
             {
+                using shared_memory_object = irods::experimental::interprocess::shared_memory_object<multipart_data<buffer_type>;
+
                 // upload upload_id in shared memory
                 // no need to shared_memory_lock as this should already be locked
 
@@ -471,10 +473,16 @@ namespace irods::experimental::io::s3_transport
                 // upload upload_id in shared memory
                 std::string& object_key = manager->object_key;
 
-                multipart_shared_data *shared_data = get_shared_data_with_timeout(object_key,
+                shared_memory_object shared_data{object_key};
+
+                object_key.atomic_exec([] (auto& _obj) {
+                    _obj.upload_id = upload_id;
+                });
+
+                /*multipart_shared_data *shared_data = get_shared_data_with_timeout(object_key,
                         manager->shared_memory_timeout_in_seconds);
 
-                shared_data->upload_id = upload_id;
+                shared_data->upload_id = upload_id;*/
 
                 return S3StatusOK;
             } // end response
