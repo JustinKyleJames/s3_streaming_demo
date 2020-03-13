@@ -26,8 +26,6 @@
 
 // boost includes
 #include <boost/algorithm/string/predicate.hpp>
-
-// boost includes
 #include <boost/interprocess/managed_shared_memory.hpp>
 #include <boost/interprocess/containers/map.hpp>
 #include <boost/interprocess/containers/vector.hpp>
@@ -42,80 +40,14 @@
 #include <boost/filesystem.hpp>
 
 // local includes
-#include "scoped_lock.hpp"  // TODO remove
+#include "scoped_lock.hpp"
 #include "shared_memory_object.hpp"
+#include "s3_multipart_shared_data.hpp"
 
 // TODO move all into s3_transport class
 
 namespace irods::experimental::io::s3_transport
 {
-
-    namespace interprocess_types
-    {
-
-        namespace bi = boost::interprocess;
-
-        using segment_manager       = bi::managed_shared_memory::segment_manager;
-        using void_allocator        = boost::container::scoped_allocator_adaptor
-                                      <bi::allocator<void, segment_manager> >;
-        using int_allocator         = bi::allocator<int, segment_manager>;
-        using char_allocator        = bi::allocator<char, segment_manager>;
-        using shm_int_vector        = bi::vector<int, int_allocator>;
-        using shm_char_string       = bi::basic_string<char, std::char_traits<char>,
-                                      char_allocator>;
-        using char_string_allocator = bi::allocator<shm_char_string, segment_manager>;
-        using shm_string_vector     = bi::vector<shm_char_string, char_string_allocator>;
-    }
-
-    // data that needs to be shared among different processes
-    struct multipart_shared_data
-    {
-
-        /*multipart_shared_data(const interprocess_types::void_allocator &allocator)
-            : last_access_time_in_seconds{time(nullptr)}
-            , file_open_counter{0}
-            , upload_id{allocator}
-            , etags{allocator}
-            , last_irods_error_code{0}
-            , cache_file_download_started_flag{false}
-            , cache_file_download_completed_flag{false}
-        {}
-
-        void reset_fields(time_t now)
-        {
-            scoped_lock shared_memory_lock(object_key);
-
-            shared_data->last_access_time_in_seconds = now;
-            shared_data->file_open_counter = 0;
-            shared_data->upload_id = "";
-            shared_data->etags.clear();
-            shared_data->last_irods_error_code = 0;
-            shared_data->cache_file_download_started_flag = false;
-            shared_data->cache_file_download_completed_flag = false;
-        }
-
-        template <typename Function>
-        auto atomic_exec(Function _func) const
-        {
-            scoped_lock shared_memory_lock(object_key);
-            return _func(object_->thing);
-        }*/
-
-        time_t                                last_access_time_in_seconds;     // timeout for shmem
-        int                                   file_open_counter;
-        interprocess_types::shm_char_string   upload_id;
-        interprocess_types::shm_string_vector etags;
-        int                                   last_irods_error_code;
-        bool                                  cache_file_download_started_flag;
-        bool                                  cache_file_download_completed_flag;
-
-        /*int adjust_file_open_counter(int offset)
-        {
-            scoped_lock shared_memory_lock(object_key);
-            return file_open_counter + offset;
-        }*/
-
-    };
 
     namespace constants
     {
@@ -126,7 +58,6 @@ namespace irods::experimental::io::s3_transport
                                             10000 * (ETAG_SIZE + 1) +
                                             UPLOAD_ID_SIZE + 1};
 
-        const std::string MULTIPART_SHARED_DATA_NAME{"SharedData"};
         const int         DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS{900};
         const std::string MULTIPART_SHARED_MEMORY_EXTENSION{"-shm"};
     }
@@ -463,8 +394,6 @@ namespace irods::experimental::io::s3_transport
             S3Status response (const libs3_char_type* upload_id,
                                void *callback_data )
             {
-                using shared_memory_object = irods::experimental::interprocess::shared_memory_object<multipart_data<buffer_type>;
-
                 // upload upload_id in shared memory
                 // no need to shared_memory_lock as this should already be locked
 
@@ -473,16 +402,10 @@ namespace irods::experimental::io::s3_transport
                 // upload upload_id in shared memory
                 std::string& object_key = manager->object_key;
 
-                shared_memory_object shared_data{object_key};
-
-                object_key.atomic_exec([] (auto& _obj) {
-                    _obj.upload_id = upload_id;
-                });
-
-                /*multipart_shared_data *shared_data = get_shared_data_with_timeout(object_key,
+                multipart_shared_data *shared_data = get_shared_data_with_timeout(object_key,
                         manager->shared_memory_timeout_in_seconds);
 
-                shared_data->upload_id = upload_id;*/
+                shared_data->upload_id = upload_id;
 
                 return S3StatusOK;
             } // end response
@@ -639,6 +562,7 @@ namespace irods::experimental::io::s3_transport
                 // to not require a resize but resize if necessary.
                 if (sequence > shared_data->etags.size()) {
                     try {
+                        shared_data->etags.resize(sequence, types::shm_char_string("", alloc_inst));
                         shared_data->etags.resize(sequence, types::shm_char_string("", alloc_inst));
                     } catch (std::bad_alloc& ba) {
                         return S3StatusOutOfMemory;
