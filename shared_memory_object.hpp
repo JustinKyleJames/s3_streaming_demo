@@ -9,8 +9,6 @@
 #include <string>
 #include <utility>
 
-#include "scoped_lock.hpp"
-
 namespace irods::experimental::interprocess
 {
     namespace shared_memory
@@ -24,27 +22,37 @@ namespace irods::experimental::interprocess
         template <typename T>
         class named_shared_memory_object
         {
+
         private:
+
             struct ipc_object
             {
-                ipc_object(void_allocator&& alloc_inst)
-                    : thing{alloc_inst}
+                template <typename... Args>
+                ipc_object(void_allocator&& alloc_inst, time_t access_time,
+                        Args&& ... args)
+                    : thing(alloc_inst, std::forward<Args>(args)...)
+                    , last_access_time_in_seconds(access_time)
                 {}
 
                 // T must have reset_fields()
                 T thing;
 
-                bi::interprocess_mutex mtx;
                 time_t last_access_time_in_seconds;
+                bi::interprocess_mutex mtx;
+
             };
 
         public:
 
-            template <typename ...Args>
+            named_shared_memory_object(const named_shared_memory_object&) = delete;
+            auto operator=(const named_shared_memory_object&) ->
+                named_shared_memory_object& = delete;
+
+            template <typename... Args>
             named_shared_memory_object(std::string shm_name,
                     time_t shared_memory_timeout_in_seconds,
                     uint64_t shm_size,
-                    Args&& ..._args)
+                    Args&& ...args)
 
                 : shm_name_{shm_name}
                 , shm_size_{shm_size}
@@ -53,19 +61,22 @@ namespace irods::experimental::interprocess
 
             {
 
-                object_ = shm_.find_or_construct<ipc_object>
-                    (SHARED_DATA_NAME.c_str())(static_cast<void_allocator>(shm_.get_segment_manager()));
-
                 const time_t now = time(0);
 
-                const bool shmem_has_expired = now - object_->last_access_time_in_seconds
+                object_ = shm_.find_or_construct<ipc_object>(SHARED_DATA_NAME.c_str())
+                    (  static_cast<void_allocator>(shm_.get_segment_manager()), now,
+                       std::forward<Args>(args)...);
+
+
+                const bool shmem_has_expired = now -
+                    object_->last_access_time_in_seconds
                     > shared_memory_timeout_in_seconds;
 
                 if (shmem_has_expired) {
                     object_->thing.reset_fields();
                 }
 
-                object_->last_access_time_in_seconds = now;
+                //object_->last_access_time_in_seconds = now;
 
             }
 
@@ -98,7 +109,9 @@ namespace irods::experimental::interprocess
             const uint64_t shm_size_;
             bi::managed_shared_memory shm_;
             void_allocator alloc_inst_;
+
             ipc_object* object_;
+
             const std::string SHARED_DATA_NAME{"SharedData"};
 
         }; // class shared_memory_object
