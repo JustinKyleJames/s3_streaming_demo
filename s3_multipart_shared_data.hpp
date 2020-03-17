@@ -37,19 +37,16 @@ namespace irods::experimental::io::s3_transport::shared_data
     {
 
         multipart_shared_data(const interprocess_types::void_allocator &allocator)
-            //: last_access_time_in_seconds{time(nullptr)}
             : file_open_counter{0}
             , upload_id{allocator}
             , etags{allocator}
             , last_irods_error_code{0}
             , cache_file_download_started_flag{false}
             , cache_file_download_completed_flag{false}
-            //, allocator_instance{allocator}
         {}
 
         void reset_fields()
         {
-            //last_access_time_in_seconds = now;
             file_open_counter = 0;
             upload_id = "";
             etags.clear();
@@ -58,13 +55,13 @@ namespace irods::experimental::io::s3_transport::shared_data
             cache_file_download_completed_flag = false;
         }
 
-        //time_t                                last_access_time_in_seconds;     // timeout for shmem
         int                                   file_open_counter;
         interprocess_types::shm_char_string   upload_id;
         interprocess_types::shm_string_vector etags;
         int                                   last_irods_error_code;
         bool                                  cache_file_download_started_flag;
         bool                                  cache_file_download_completed_flag;
+        boost::interprocess::interprocess_recursive_mutex file_open_mutex;
 
     };
 

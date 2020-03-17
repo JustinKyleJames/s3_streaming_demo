@@ -38,7 +38,7 @@ namespace irods::experimental::interprocess
                 T thing;
 
                 time_t last_access_time_in_seconds;
-                bi::interprocess_mutex mtx;
+                bi::interprocess_recursive_mutex mtx;
 
             };
 

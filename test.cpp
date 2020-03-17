@@ -14,7 +14,6 @@ int main() {
     namespace types = irods::experimental::io::s3_transport::shared_data::interprocess_types;
 
     named_shared_memory_object obj{"helloworld", 900, 65536};
-
     // resizing vector
     obj.atomic_exec([&obj](auto& _obj) {
             _obj.upload_id = "abc";
@@ -22,9 +21,10 @@ int main() {
             _obj.etags[0] = "123";
             _obj.etags[1] = "456";
     });
+    named_shared_memory_object obj2{"helloworld", 900, 65536};
 
     // getting a value
-    auto val = obj.atomic_exec([](auto& _obj) {
+    auto val = obj2.atomic_exec([](auto& _obj) {
             return _obj.upload_id;
     });
     std::cout << val << std::endl;
