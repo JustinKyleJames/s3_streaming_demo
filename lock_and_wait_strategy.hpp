@@ -11,7 +11,7 @@ namespace experimental {
         public:
             using wait_predicate = std::function<bool()>;
             using the_work = std::function<void()>;
-            virtual void operator()(wait_predicate, the_work) = 0; 
+            virtual void operator()(wait_predicate, the_work) = 0;
             virtual ~lock_and_wait_strategy() {};
     };
 
@@ -20,7 +20,7 @@ namespace experimental {
             void operator()(wait_predicate, the_work w) {
                 w();
             }
-    }; 
+    };
 
     class lock_and_wait : public lock_and_wait_strategy {
         public:
@@ -36,8 +36,8 @@ namespace experimental {
         private:
             std::condition_variable cv;
             std::mutex cv_mutex;
-    }; 
-        
+    };
+
 } // namespace experimental
 } // namespace irods
 
