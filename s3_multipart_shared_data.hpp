@@ -61,6 +61,8 @@ namespace irods::experimental::io::s3_transport::shared_data
         int                                   last_irods_error_code;
         bool                                  cache_file_download_started_flag;
         bool                                  cache_file_download_completed_flag;
+
+        // TODO add using above for this
         boost::interprocess::interprocess_recursive_mutex file_open_mutex;
 
     };

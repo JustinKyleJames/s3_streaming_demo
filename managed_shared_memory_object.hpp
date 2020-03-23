@@ -38,6 +38,7 @@ namespace irods::experimental::interprocess
                 T thing;
 
                 time_t last_access_time_in_seconds;
+                // TODO rename to something like access_mutex
                 bi::interprocess_recursive_mutex mtx;
 
             };
@@ -75,8 +76,6 @@ namespace irods::experimental::interprocess
                 if (shmem_has_expired) {
                     object_->thing.reset_fields();
                 }
-
-                //object_->last_access_time_in_seconds = now;
 
             }
 
