@@ -203,10 +203,9 @@ namespace irods::experimental::io::s3_transport
 
         ~s3_transport() {
 
-            // TODO use smart pointer
             if (begin_part_upload_thread_ptr_) {
                 begin_part_upload_thread_ptr_ -> join();
-                delete begin_part_upload_thread_ptr_;
+                begin_part_upload_thread_ptr_ = nullptr;
             }
 
             if (put_props_.md5) free( (char*)put_props_.md5 );
@@ -301,12 +300,14 @@ namespace irods::experimental::io::s3_transport
                 constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS,
                 constants::MAX_S3_SHMEM_SIZE};
 
-            // TODO rename success_flag with more descriptive name
             int file_open_counter;
-            bool success_flag = shm_obj.atomic_exec([this, &file_open_counter, &shm_obj, open_flags](auto& data) {
 
-                // TODO file_open_counter == 0 don't decrement
-                file_open_counter = --(data.file_open_counter);
+            // do close processing if # files open = 0
+            //  - for multipart upload send the complete message
+            //  - if using a cache file flush the cache and delete cache file
+            bool close_processing_success_flag = shm_obj.atomic_exec([this, &file_open_counter, &shm_obj, open_flags](auto& data) {
+
+                file_open_counter = data.file_open_counter > 0 ? --(data.file_open_counter) : 0;
 
                 if (file_open_counter == 0) {
 
@@ -343,10 +344,6 @@ namespace irods::experimental::io::s3_transport
                                 file_open_counter);
                     }
 
-                    // remove shmem object
-                    // TODO remove should be out of the shm_obj scope
-                    //shm_obj.remove();
-
                 }
 
                 return true;
@@ -358,14 +355,16 @@ namespace irods::experimental::io::s3_transport
                 shm_obj.remove();
             }
 
-            if (!success_flag) {
-                return success_flag;
+            if (!close_processing_success_flag) {
+                return close_processing_success_flag;
             }
 
             // each process must initialize and deinitiatize.
-            // TODO need a lock
-            if (--s3_initialized_counter_ == 0) {
-                S3_deinitialize();
+            {
+                std::lock_guard<std::mutex> lock(s3_initialized_counter_mutex_);
+                if (--s3_initialized_counter_ == 0) {
+                    S3_deinitialize();
+                }
             }
 
             return true;
@@ -395,7 +394,7 @@ namespace irods::experimental::io::s3_transport
 
             // if we haven't already started an upload thread, start it
             if (!begin_part_upload_thread_ptr_) {
-                begin_part_upload_thread_ptr_ = new std::thread(&s3_transport::s3_upload_part_worker_routine, this);
+                begin_part_upload_thread_ptr_ = std::make_unique<std::thread>(&s3_transport::s3_upload_part_worker_routine, this);
             }
 
 
@@ -680,6 +679,8 @@ namespace irods::experimental::io::s3_transport
             });
 
             // each process must intitialize S3
+            // note: locked from file_open_lock so no need to lock
+            // with s3_initialized_counter_mutex_
             if (s3_initialized_counter_ == 0) {
 
                 int flags = S3_INIT_ALL;
@@ -1320,57 +1321,58 @@ namespace irods::experimental::io::s3_transport
             }
         }
 
-        int                         fd_;
-        nlohmann::json              fd_info_;
-        uint64_t                    object_size_;
-        int                         number_of_transfer_threads_;
-        uint64_t                    part_size_;
-        int                         retry_count_limit_;
-        int                         retry_wait_seconds_;
-        std::string                 hostname_;
-        std::string                 bucket_name_;
-        std::string                 access_key_;
-        std::string                 secret_access_key_;
-        std::string                 object_key_;
-        libs3_types::bucket_context bucket_context_;
-        upload_manager              upload_manager_;
-        S3SignatureVersion          s3_signature_version_;
+        int                          fd_;
+        nlohmann::json               fd_info_;
+        uint64_t                     object_size_;
+        int                          number_of_transfer_threads_;
+        uint64_t                     part_size_;
+        int                          retry_count_limit_;
+        int                          retry_wait_seconds_;
+        std::string                  hostname_;
+        std::string                  bucket_name_;
+        std::string                  access_key_;
+        std::string                  secret_access_key_;
+        std::string                  object_key_;
+        libs3_types::bucket_context  bucket_context_;
+        upload_manager               upload_manager_;
+        S3SignatureVersion           s3_signature_version_;
 
-        time_t                      shared_memory_timeout_in_seconds_;
-        bool                        enable_md5_flag_;
-        bool                        server_encrypt_flag_;
+        time_t                       shared_memory_timeout_in_seconds_;
+        bool                         enable_md5_flag_;
+        bool                         server_encrypt_flag_;
 
-        bool                        debug_flag_;
-        multipart_data<buffer_type> mpu_data_;
-        bool                        call_s3_upload_part_flag_;
-        bool                        call_s3_download_part_flag_;
-        S3PutProperties             put_props_;
+        bool                         debug_flag_;
+        multipart_data<buffer_type>  mpu_data_;
+        bool                         call_s3_upload_part_flag_;
+        bool                         call_s3_download_part_flag_;
+        S3PutProperties              put_props_;
 
         irods::experimental::circular_buffer<upload_page<buffer_type>>
-                                    circular_buffer_;
-        std::thread                 *begin_part_upload_thread_ptr_;
+                                     circular_buffer_;
+        std::unique_ptr<std::thread> begin_part_upload_thread_ptr_;
 
-        std::ios_base::openmode     mode_;
-        off_t                       file_offset_;
-        bool                        multipart_flag_;
-        int                         cache_fd_;
-        std::string                 cache_directory_;
+        std::ios_base::openmode      mode_;
+        off_t                        file_offset_;
+        bool                         multipart_flag_;
+        int                          cache_fd_;
+        std::string                  cache_directory_;
 
         // operational modes based on input flags
-        bool                        download_to_cache_;
-        bool                        use_cache_;
-        bool                        object_must_exist_;
+        bool                         download_to_cache_;
+        bool                         use_cache_;
+        bool                         object_must_exist_;
 
         // just for debugging purposes
-        int                         object_identifier_;
+        int                          object_identifier_;
 
-        inline static int           file_descriptor_counter_ = minimum_valid_file_descriptor;
+        inline static int            file_descriptor_counter_ = minimum_valid_file_descriptor;
 
         // this counter keeps track of whether this process has initialized
         // S3.  If we are in a multithreaded / single process environment the
         // initialization will run only once.  If we are in a multiprocess
         // environment it will run multiple times.
-        inline static int          s3_initialized_counter_ = 0;
+        inline static int            s3_initialized_counter_ = 0;
+        inline static std::mutex     s3_initialized_counter_mutex_;
 
     }; // s3_transport
 

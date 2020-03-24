@@ -119,8 +119,6 @@ namespace irods::experimental::io::s3_transport
         time_t                   shared_memory_timeout_in_seconds;
     };
 
-    // TODO put in own header
-
     template <typename buffer_type>
     struct data_for_write_callback
     {
@@ -143,7 +141,8 @@ namespace irods::experimental::io::s3_transport
         uint64_t            bytes_written;
         libs3_types::status status;
 
-        libs3_types::bucket_context&    saved_bucket_context;   /* To enable more detailed error messages */
+        libs3_types::bucket_context&
+                            saved_bucket_context;   /* To enable more detailed error messages */
         bool                debug_flag;
         int                 object_identifier;
     };

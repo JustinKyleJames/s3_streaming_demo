@@ -46,8 +46,6 @@ namespace irods::experimental::io::s3_transport
 
         public:
 
-            using char_type   = typename buffer_type::value_type;
-
             callback_for_read_from_s3_base(libs3_types::bucket_context& _saved_bucket_context)
                 : saved_bucket_context{_saved_bucket_context}
                 , sequence{0}
@@ -56,10 +54,10 @@ namespace irods::experimental::io::s3_transport
             {}
 
             virtual libs3_types::status callback_implementation(int libs3_buffer_size,
-                                                                const char_type *libs3_buffer) = 0;
+                                                                const libs3_types::char_type *libs3_buffer) = 0;
 
             static libs3_types::status invoke_callback(int libs3_buffer_size,
-                                                       const char_type *libs3_buffer,
+                                                       const libs3_types::char_type *libs3_buffer,
                                                        void *callback_data)
             {
                 callback_for_read_from_s3_base *data =
@@ -75,8 +73,8 @@ namespace irods::experimental::io::s3_transport
             }
 
             static void on_response_completion (libs3_types::status status,
-                                                      const libs3_types::error_details *error,
-                                                      void *callback_data)
+                                                const libs3_types::error_details *error,
+                                                void *callback_data)
             {
                 callback_for_read_from_s3_base *data = (callback_for_read_from_s3_base*)callback_data;
                 store_and_log_status( status, error, __FUNCTION__, data->saved_bucket_context, data->status,
@@ -102,14 +100,12 @@ namespace irods::experimental::io::s3_transport
 
         public:
 
-            using char_type   = typename buffer_type::value_type;
-
             callback_for_read_from_s3_to_cache(libs3_types::bucket_context& _saved_bucket_context)
                 : callback_for_read_from_s3_base<buffer_type>{_saved_bucket_context}
             {}
 
             libs3_types::status callback_implementation(int libs3_buffer_size,
-                                                        const char_type *libs3_buffer)
+                                                        const libs3_types::char_type *libs3_buffer)
             {
 
                 // writing output to cache file
@@ -141,14 +137,14 @@ namespace irods::experimental::io::s3_transport
 
         public:
 
-            using char_type   = typename buffer_type::value_type;
+            using output_char_type   = typename buffer_type::value_type;
 
             callback_for_read_from_s3_to_buffer(libs3_types::bucket_context& _saved_bucket_context)
                 : callback_for_read_from_s3_base<buffer_type>{_saved_bucket_context}
             {}
 
             libs3_types::status callback_implementation(int libs3_buffer_size,
-                                                        const char_type *libs3_buffer)
+                                                        const libs3_types::char_type *libs3_buffer)
             {
                 // writing to buffer
 
@@ -173,15 +169,15 @@ namespace irods::experimental::io::s3_transport
                 output_buffer_size = size;
             }
 
-            void set_output_buffer(char_type *buffer)
+            void set_output_buffer(output_char_type *buffer)
             {
                 output_buffer = buffer;
             }
 
         private:
 
-            char_type       *output_buffer;
-            uint64_t        output_buffer_size;
+            output_char_type *output_buffer;
+            uint64_t         output_buffer_size;
 
     };
 
@@ -214,8 +210,8 @@ namespace irods::experimental::io::s3_transport
                                                      void *callback_data);
 
             void on_response_completion (libs3_types::status status,
-                                      const libs3_types::error_details *error,
-                                      void *callback_data);
+                                         const libs3_types::error_details *error,
+                                         void *callback_data);
 
         } // end namespace commit_callback
 
@@ -224,8 +220,8 @@ namespace irods::experimental::io::s3_transport
         {
             template <typename buffer_type>
             int on_put_data (int libs3_buffer_size,
-                          libs3_types::buffer_type libs3_buffer,
-                          void *callback_data)
+                             libs3_types::buffer_type libs3_buffer,
+                             void *callback_data)
             {
                 data_for_write_callback<buffer_type>& data =
                     (static_cast<multipart_data<buffer_type>*>(callback_data))->put_object_data;
@@ -281,7 +277,7 @@ namespace irods::experimental::io::s3_transport
 
             template <typename buffer_type>
             libs3_types::status on_response_properties (const libs3_types::response_properties *properties,
-                                                     void *callback_data)
+                                                        void *callback_data)
             {
                 // update etag for this object
 
@@ -331,8 +327,8 @@ namespace irods::experimental::io::s3_transport
 
             template <typename buffer_type>
             void on_response_completion (libs3_types::status status,
-                                      const libs3_types::error_details *error,
-                                      void *callback_data)
+                                         const libs3_types::error_details *error,
+                                         void *callback_data)
             {
                 multipart_data<buffer_type> *data = (multipart_data<buffer_type> *)callback_data;
                 store_and_log_status( status, error, __FUNCTION__, data->put_object_data.saved_bucket_context,
