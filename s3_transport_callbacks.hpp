@@ -14,6 +14,7 @@
 #include <condition_variable>
 #include <new>
 #include <time.h>
+#include <fstream>
 
 // boost includes
 #include <boost/algorithm/string/predicate.hpp>
@@ -85,13 +86,12 @@ namespace irods::experimental::io::s3_transport
 
             virtual ~callback_for_read_from_s3_base() {};
 
-            int                  sequence;
-
-            long                 offset;       /* For multiple upload */
-            uint64_t             content_length;
-            libs3_types::status  status;
-            libs3_types::bucket_context&     saved_bucket_context; /* To enable more detailed error messages */
-            bool                 debug_flag;
+            int                          sequence;
+            uint64_t                     offset;       /* For multiple upload */
+            uint64_t                     content_length;
+            libs3_types::status          status;
+            libs3_types::bucket_context& saved_bucket_context; /* To enable more detailed error messages */
+            bool                         debug_flag;
     };
 
     template <typename buffer_type>
@@ -108,9 +108,15 @@ namespace irods::experimental::io::s3_transport
                                                         const libs3_types::char_type *libs3_buffer)
             {
 
-                // writing output to cache file
+                if (!cache_fstream.is_open()) {
+                    cache_fstream.open(filename.c_str(), std::ios_base::out);
+                }
 
-                auto wrote = pwrite(cache_fd, libs3_buffer, libs3_buffer_size, this->offset);
+                // writing output to cache file
+                cache_fstream.seekp(this->offset);
+                cache_fstream.write(libs3_buffer, libs3_buffer_size);
+
+                auto wrote = static_cast<uint64_t>(cache_fstream.tellp()) - this->offset;
                 if (wrote>0) this->offset += wrote;
 
                 return ((wrote < static_cast<decltype(wrote)>(libs3_buffer_size)) ?
@@ -120,14 +126,16 @@ namespace irods::experimental::io::s3_transport
 
             ~callback_for_read_from_s3_to_cache() {};
 
-            void set_cache_fd(int fd)
+            void set_and_open_cache_file(std::string& f)
             {
-                cache_fd = fd;
+                filename = f;
+                cache_fstream.open(filename.c_str(), std::ios_base::out);
             }
 
         private:
 
-            int cache_fd;
+            std::string   filename;
+            std::ofstream cache_fstream;
 
     };
 

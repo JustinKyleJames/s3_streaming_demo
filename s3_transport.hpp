@@ -112,6 +112,10 @@ namespace irods::experimental::io::s3_transport
 
     private:
 
+        using named_shared_memory_object =
+            irods::experimental::interprocess::shared_memory::named_shared_memory_object
+            <shared_data::multipart_shared_data>;
+
         // clang-format off
         inline static constexpr auto uninitialized_file_descriptor = -1;
         inline static constexpr auto minimum_valid_file_descriptor = 3;
@@ -143,7 +147,6 @@ namespace irods::experimental::io::s3_transport
             , server_encrypt_flag_{_config.server_encrypt_flag}
             , cache_directory_{_config.cache_directory}
             , debug_flag_{_config.debug_flag}
-            , cache_fd_{0}
             , fd_{uninitialized_file_descriptor}
             , fd_info_{}
             , call_s3_upload_part_flag_{true}
@@ -260,10 +263,6 @@ namespace irods::experimental::io::s3_transport
             namespace bi = boost::interprocess;
             namespace types = shared_data::interprocess_types;
 
-            using named_shared_memory_object =
-                irods::experimental::interprocess::shared_memory::named_shared_memory_object
-                <shared_data::multipart_shared_data>;
-
             if (!is_open()) {
                 return false;
             }
@@ -313,21 +312,7 @@ namespace irods::experimental::io::s3_transport
 
                     if (use_cache_) {
 
-                        namespace bf = boost::filesystem;
-
-                        // Flush the cache file to S3.
-
-                        bf::path cache_file =  bf::path(cache_directory_) / bf::path(object_key_ + "-cache");
-
-                        // go ahead and upload the object
-                        cache_fd_ = open(cache_file.string().c_str(), O_RDONLY);
-                        off_t cache_file_size = lseek(cache_fd_, 0, SEEK_END);
-
-                        uint64_t part_size = cache_file_size / number_of_transfer_threads_;
-
-                        flush_cache_file(part_size);
-
-                        ::close(cache_fd_);
+                        flush_cache_file();
 
 
                     } else if ( is_full_multipart_upload(open_flags) ) {
@@ -392,6 +377,11 @@ namespace irods::experimental::io::s3_transport
                         __FILE__, __LINE__, __FUNCTION__, object_identifier_, _buffer_size);
             }
 
+            // if part_size_ is 0 then bail
+            if (0 == part_size_) {
+                return 0;
+            }
+
             // if we haven't already started an upload thread, start it
             if (!begin_part_upload_thread_ptr_) {
                 begin_part_upload_thread_ptr_ = std::make_unique<std::thread>(&s3_transport::s3_upload_part_worker_routine, this);
@@ -415,14 +405,21 @@ namespace irods::experimental::io::s3_transport
 
                 int return_val;
                 switch (_dir) {
-                    case std::ios_base::beg:
-                        return lseek(cache_fd_, _offset, SEEK_SET);
+                    cache_fstream_.seekg(_offset, _dir);
+                    return cache_fstream_.tellg();
+                    /*case std::ios_base::beg:
+                        cache_fstream_.seekg(offset);
+                        return tellg();
 
                     case std::ios_base::cur:
-                        return lseek(cache_fd_, _offset, SEEK_CUR);
+                        cache_fstream_.seekg(offset, std::ios_base::cur);
+                        return tellg();
+                        //return lseek(cache_fd_, _offset, SEEK_CUR);
 
                     case std::ios_base::end:
-                        return lseek(cache_fd_, _offset, SEEK_END);
+                        cache_fstream_.seekg(offset, std::ios_base::end);
+                        return tellg();
+                        //return lseek(cache_fd_, _offset, SEEK_END);*/
 
                     default:
                         return seek_error;
@@ -482,7 +479,87 @@ namespace irods::experimental::io::s3_transport
 
     private:
 
-        void flush_cache_file(uint64_t part_size) {
+        void download_object_to_cache(named_shared_memory_object& shm_obj)
+        {
+
+            namespace bf = boost::filesystem;
+
+            // TODO not yet tested
+
+            // TODO not sure how boost::filesystem will handle this if object_key_ has a directory structure in it. test.
+            bf::path cache_file =  bf::path(cache_directory_) / bf::path(object_key_ + "-cache");
+            cache_file_path_ = cache_file.string();
+
+            bool cache_file_download_started_flag = shm_obj.atomic_exec([](auto& data) {
+                bool return_val = data.cache_file_download_started_flag;
+                data.cache_file_download_started_flag = true;
+                return return_val;
+            });
+
+
+            if (!cache_file_download_started_flag) {
+
+                // TODO thread pool
+
+                // go ahead and download the object to cache file
+
+                uint64_t part_size = object_size_ / number_of_transfer_threads_;
+
+                unsigned long long usStart = get_time_in_microseconds();
+                std::list<std::thread*> threads;
+                for (int thr_id=0; thr_id < number_of_transfer_threads_; thr_id++) {
+
+                    uint64_t this_part_size;
+                    if (thr_id == number_of_transfer_threads_ - 1) {
+                        this_part_size = part_size + (object_size_ - part_size * number_of_transfer_threads_);
+                    } else {
+                        this_part_size = part_size;
+                    }
+
+                    std::thread *this_thread= new std::thread(&s3_transport::s3_download_part_worker_routine,
+                            this, nullptr, this_part_size);
+                    threads.push_back(this_thread);
+
+                }
+
+                // Wait for threads to finish
+                while (!threads.empty()) {
+                    std::thread *this_thread= threads.front();
+                    this_thread->join();
+                    delete this_thread;
+                    threads.pop_front();
+                }
+
+                shm_obj.atomic_exec([](auto& data) {
+                    data.cache_file_download_completed_flag = true;
+                });
+            }
+
+            // download has started so we must wait until it completes before continuing
+            // TODO figure out a better way to do this than a busy wait
+            //      can't use std::condition_variable because of the multiprocess case
+            //      get it working and then fix it
+            while (!(shm_obj.atomic_exec([](auto& data) { return data.cache_file_download_completed_flag; }))) {
+                sleep(1);
+            }
+        }
+
+        void flush_cache_file() {
+
+            namespace bf = boost::filesystem;
+
+            // Flush the cache file to S3.
+
+            bf::path cache_file =  bf::path(cache_directory_) / bf::path(object_key_ + "-cache");
+            cache_file_path_ = cache_file.string();
+
+            // calculate the part size
+            std::ifstream ifs;
+            ifs.open(cache_file_path_.c_str(), std::ios::out);
+            ifs.seekg(0, std::ios_base::end);
+            off_t cache_file_size = ifs.tellg();
+            uint64_t part_size = cache_file_size / number_of_transfer_threads_;
+            ifs.close();
 
             std::list<std::thread*> cache_flush_thread_list;
 
@@ -614,10 +691,6 @@ namespace irods::experimental::io::s3_transport
             namespace bi = boost::interprocess;
             namespace types = shared_data::interprocess_types;
 
-            using named_shared_memory_object =
-                irods::experimental::interprocess::shared_memory::named_shared_memory_object
-                <shared_data::multipart_shared_data>;
-
             if (debug_flag_) {
                 printf("%s:%d (%s) [[%d]] [_mode & in = %d][_mode & out = %d]"
                     "[_mode & trunc = %d][_mode & app = %d]\n",
@@ -700,72 +773,7 @@ namespace irods::experimental::io::s3_transport
             ++s3_initialized_counter_;
 
             if (object_exists && download_to_cache_) {
-
-                // TODO subroutine that does this
-
-                namespace bf = boost::filesystem;
-
-                // TODO not yet tested
-
-                // TODO not sure how boost::filesystem will handle this if object_key_ has a directory structure in it. test.
-                bf::path cache_file =  bf::path(cache_directory_) / bf::path(object_key_ + "-cache");
-
-                bool cache_file_download_started_flag = shm_obj.atomic_exec([](auto& data) {
-                    bool return_val = data.cache_file_download_started_flag;
-                    data.cache_file_download_started_flag = true;
-                    return return_val;
-                });
-
-
-                if (!cache_file_download_started_flag) {
-
-                    // TODO thread pool
-                    // TODO use file stream instead of posix calls (everywhere)
-
-                    // go ahead and download the object to cache file
-                    cache_fd_ = open(cache_file.string().c_str(), O_WRONLY);
-
-                    uint64_t part_size = object_size_ / number_of_transfer_threads_;
-
-                    unsigned long long usStart = get_time_in_microseconds();
-                    std::list<std::thread*> threads;
-                    for (int thr_id=0; thr_id < number_of_transfer_threads_; thr_id++) {
-
-                        uint64_t this_part_size;
-                        if (thr_id == number_of_transfer_threads_ - 1) {
-                            this_part_size = part_size + (object_size_ - part_size * number_of_transfer_threads_);
-                        } else {
-                            this_part_size = part_size;
-                        }
-
-                        std::thread *this_thread= new std::thread(&s3_transport::s3_download_part_worker_routine,
-                                this, nullptr, this_part_size);
-                        threads.push_back(this_thread);
-
-                    }
-
-                    // Wait for threads to finish
-                    while (!threads.empty()) {
-                        std::thread *this_thread= threads.front();
-                        this_thread->join();
-                        delete this_thread;
-                        threads.pop_front();
-                    }
-
-                    shm_obj.atomic_exec([](auto& data) {
-                        data.cache_file_download_completed_flag = true;
-                    });
-
-                }
-
-                // download has started so we must wait until it completes before continuing
-                // TODO figure out a better way to do this than a busy wait
-                //      can't use std::condition_variable because of the multiprocess case
-                //      get it working and then fix it
-                while (!(shm_obj.atomic_exec([](auto& data) { return data.cache_file_download_completed_flag; }))) {
-                    sleep(1);
-                }
-
+                download_object_to_cache(shm_obj);
             }
 
             if ( is_full_upload(open_flags) ) {
@@ -842,10 +850,6 @@ namespace irods::experimental::io::s3_transport
         {
             namespace bi = boost::interprocess;
             namespace types = shared_data::interprocess_types;
-
-            using named_shared_memory_object =
-                irods::experimental::interprocess::shared_memory::named_shared_memory_object
-                <shared_data::multipart_shared_data>;
 
             int cache_fd = -1;
             int err_status = 0;
@@ -930,10 +934,6 @@ namespace irods::experimental::io::s3_transport
             namespace bi = boost::interprocess;
             namespace types = shared_data::interprocess_types;
 
-            using named_shared_memory_object =
-                irods::experimental::interprocess::shared_memory::named_shared_memory_object
-                <shared_data::multipart_shared_data>;
-
             // read shared memory entry for this key
             auto shared_memory_name =  object_key_ + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
 
@@ -982,10 +982,6 @@ namespace irods::experimental::io::s3_transport
         {
             namespace bi = boost::interprocess;
             namespace types = shared_data::interprocess_types;
-
-            using named_shared_memory_object =
-                irods::experimental::interprocess::shared_memory::named_shared_memory_object
-                <shared_data::multipart_shared_data>;
 
             auto shared_memory_name =  object_key_ + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
 
@@ -1082,17 +1078,11 @@ namespace irods::experimental::io::s3_transport
             namespace bi = boost::interprocess;
             namespace types = shared_data::interprocess_types;
 
-            // TODO privately declare this
-            using named_shared_memory_object =
-                irods::experimental::interprocess::shared_memory::named_shared_memory_object
-                <shared_data::multipart_shared_data>;
-
             std::stringstream msg;
 
             int retry_cnt = 0;
 
-            // TODO rename read_callback_data to read_callback
-            std::shared_ptr<callback_for_read_from_s3_base<buffer_type>> read_callback_data;
+            std::shared_ptr<callback_for_read_from_s3_base<buffer_type>> read_callback;
 
             do {
 
@@ -1106,28 +1096,28 @@ namespace irods::experimental::io::s3_transport
 
                 if (buffer == nullptr) {
                     // Download to cache
-                    read_callback_data.reset(new callback_for_read_from_s3_to_cache<buffer_type>
+                    read_callback.reset(new callback_for_read_from_s3_to_cache<buffer_type>
                             (bucket_context_));
                     static_cast<callback_for_read_from_s3_to_cache<buffer_type>*>
-                        (read_callback_data.get())->set_cache_fd(cache_fd_);
+                        (read_callback.get())->set_and_open_cache_file(cache_file_path_);
                 } else {
                     // Download to buffer
-                    read_callback_data.reset(new callback_for_read_from_s3_to_buffer<buffer_type>(bucket_context_));
-                    static_cast<callback_for_read_from_s3_to_buffer<buffer_type>*>(read_callback_data.get())
+                    read_callback.reset(new callback_for_read_from_s3_to_buffer<buffer_type>(bucket_context_));
+                    static_cast<callback_for_read_from_s3_to_buffer<buffer_type>*>(read_callback.get())
                         ->set_output_buffer(buffer);
-                    static_cast<callback_for_read_from_s3_to_buffer<buffer_type>*>(read_callback_data.get())
+                    static_cast<callback_for_read_from_s3_to_buffer<buffer_type>*>(read_callback.get())
                         ->set_output_buffer_size(length);
 
                 }
-                read_callback_data->content_length = length;
-                read_callback_data->offset = 0;
-                read_callback_data->debug_flag = debug_flag_;
+                read_callback->content_length = length;
+                read_callback->offset = 0;
+                read_callback->debug_flag = debug_flag_;
 
                 if (debug_flag_) {
                     msg.str( std::string() ); // Clear
                     msg << "Multirange:  Start range key \"" << object_key_ << "\", offset "
-                        << static_cast<long>(read_callback_data->offset) << ", len "
-                        << static_cast<int>(read_callback_data->content_length);
+                        << static_cast<long>(read_callback->offset) << ", len "
+                        << static_cast<int>(read_callback->content_length);
                     printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_,
                             msg.str().c_str());
                 }
@@ -1136,35 +1126,35 @@ namespace irods::experimental::io::s3_transport
                 print_bucket_context(bucket_context_);
                 S3_get_object( &bucket_context_, object_key_.c_str(), NULL,
                         file_offset_,
-                        read_callback_data->content_length, 0,
-                        &get_object_handler, read_callback_data.get() );
+                        read_callback->content_length, 0,
+                        &get_object_handler, read_callback.get() );
 
                 if (debug_flag_) {
                     unsigned long long usEnd = get_time_in_microseconds();
-                    double bw = (read_callback_data->content_length / (1024.0*1024.0)) /
+                    double bw = (read_callback->content_length / (1024.0*1024.0)) /
                         ( (usEnd - usStart) / 1000000.0 );
                     msg << " -- END -- BW=" << bw << " MB/s";
                     printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__,
                             object_identifier_, msg.str().c_str());
                 }
 
-                if (read_callback_data->status != S3StatusOK) s3_sleep( retry_wait_seconds_, 0 );
+                if (read_callback->status != S3StatusOK) s3_sleep( retry_wait_seconds_, 0 );
 
-            } while ((read_callback_data->status != S3StatusOK)
-                    && S3_status_is_retryable(read_callback_data->status)
+            } while ((read_callback->status != S3StatusOK)
+                    && S3_status_is_retryable(read_callback->status)
                     && (++retry_cnt < retry_count_limit_));
 
-            if (read_callback_data->status != S3StatusOK) {
+            if (read_callback->status != S3StatusOK) {
                 msg.str( std::string() ); // Clear
                 msg << " - Error getting the S3 object: \"" << object_key_ << " ";
-                if (read_callback_data->status >= 0) {
-                    msg << " - \"" << S3_get_status_name( read_callback_data->status ) << "\"";
+                if (read_callback->status >= 0) {
+                    msg << " - \"" << S3_get_status_name( read_callback->status ) << "\"";
                 }
                 printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__,
                         object_identifier_, msg.str().c_str());
             }
 
-            if (read_callback_data->status != S3StatusOK) {
+            if (read_callback->status != S3StatusOK) {
 
                 // update the last error in shmem
 
@@ -1185,10 +1175,6 @@ namespace irods::experimental::io::s3_transport
         {
             namespace bi = boost::interprocess;
             namespace types = shared_data::interprocess_types;
-
-            using named_shared_memory_object =
-                irods::experimental::interprocess::shared_memory::named_shared_memory_object
-                <shared_data::multipart_shared_data>;
 
             // read upload_id from shmem
             auto shared_memory_name =  object_key_ + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
@@ -1225,7 +1211,7 @@ namespace irods::experimental::io::s3_transport
 
             // determine the sequence number from the offset, file size, and buffer size
             // the last page might be larger so doing a little trick to handle that case (second term)
-            // TODO make sure part_size can't be zero
+            //  Note:  We bailed early if part_size_ == 0
             int sequence = (file_offset_ / part_size_) + (file_offset_ % part_size_ == 0 ? 0 : 1) + 1;
 
             // estimate the size and resize the etags vector
@@ -1233,18 +1219,26 @@ namespace irods::experimental::io::s3_transport
             number_of_parts = number_of_parts < sequence ? sequence : number_of_parts;
 
             // resize the etags vector if necessary
-            // TODO return code if malloc error happens and abort
-            shm_obj.atomic_exec([number_of_parts, &shm_obj](auto& data) {
+            int resize_error = shm_obj.atomic_exec([number_of_parts, &shm_obj](auto& data) {
 
                 if (number_of_parts > data.etags.size()) {
                     try {
                         data.etags.resize(number_of_parts, types::shm_char_string("", shm_obj.get_allocator()));
                     } catch (std::bad_alloc& ba) {
                         data.last_irods_error_code = SYS_MALLOC_ERR;
+                        return true;
                     }
                 }
 
+                return false;
+
             });
+
+            if (resize_error) {
+                printf("Error on reallocation of etags buffer in shared memory.");
+                return;
+            }
+
 
             do {
 
@@ -1354,6 +1348,9 @@ namespace irods::experimental::io::s3_transport
         std::ios_base::openmode      mode_;
         off_t                        file_offset_;
         bool                         multipart_flag_;
+
+        std::string                  cache_file_path_;
+        std::fstream                 cache_fstream_;
         int                          cache_fd_;
         std::string                  cache_directory_;
 
