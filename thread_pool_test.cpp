@@ -1,6 +1,6 @@
-#include <iostream>
 #include <thread_pool.hpp>
 #include <boost/chrono.hpp>
+#include <stdio.h>
 
 
 int main() {
@@ -12,17 +12,21 @@ int main() {
     for (unsigned int i = 0; i < THREAD_COUNT; ++i) {
 
         irods::thread_pool::post(threads, [i] () {
-                std::cout << "thread " << i << " start" << std::endl << std::flush;
+                printf("[%u] running\n", i);
+                fflush(stdout);
                 boost::this_thread::sleep_for(boost::chrono::milliseconds(i * 1000));
-                std::cout << "thread " << i << " finish" << std::endl << std::flush;
+                printf("[%u] finishing\n", i);
+                fflush(stdout);
         });
 
     }
 
-    std::cout << "waiting for threads to finish..." << std::endl;
+    printf("waiting for threads to finish\n");
+    fflush(stdout);
     threads.stop();
     threads.join();
-    std::cout << "done waiting" << std::endl;
+    printf("done waiting\n");
+    fflush(stdout);
 
     return 0;
 }
