@@ -24,6 +24,7 @@
 #include <condition_variable>
 #include <new>
 #include <time.h>
+#include <chrono>
 
 // boost includes
 #include <boost/algorithm/string/predicate.hpp>
@@ -146,19 +147,12 @@ namespace irods::experimental::io::s3_transport
             , object_must_exist_{false}
             , object_identifier_{_config.object_identifier}
             , upload_manager_{bucket_context_}
-            , mpu_data_{upload_manager_, bucket_context_, circular_buffer_}
             , put_props_{}
             , bucket_context_{}
         {
 
-            mpu_data_.enable_md5 = config_.enable_md5_flag;
-            mpu_data_.server_encrypt = config_.server_encrypt_flag;
-            mpu_data_.object_identifier = object_identifier_;
-            mpu_data_.shared_memory_timeout_in_seconds = config_.shared_memory_timeout_in_seconds;
-
             upload_manager_.debug_flag = config_.debug_flag;
             upload_manager_.shared_memory_timeout_in_seconds = config_.shared_memory_timeout_in_seconds;
-            mpu_data_.debug_flag = config_.debug_flag;
 
             bucket_context_.hostName        = config_.hostname.c_str();
             bucket_context_.bucketName      = config_.bucket_name.c_str();
@@ -202,7 +196,7 @@ namespace irods::experimental::io::s3_transport
 
         bool object_exists_in_s3() {
             // TODO
-            return false;
+            return true;
         }
 
 
@@ -370,7 +364,8 @@ namespace irods::experimental::io::s3_transport
 
             // if we haven't already started an upload thread, start it
             if (!begin_part_upload_thread_ptr_) {
-                begin_part_upload_thread_ptr_ = std::make_unique<std::thread>(&s3_transport::s3_upload_part_worker_routine, this);
+                begin_part_upload_thread_ptr_ = std::make_unique<std::thread>(
+                        &s3_transport::s3_upload_part_worker_routine, this, false, 0, 0);
             }
 
 
@@ -479,9 +474,6 @@ namespace irods::experimental::io::s3_transport
                     return initiate_multipart_upload();
                 });
 
-                // send initiate message to S3
-                //int ret = initiate_multipart_upload();
-
                 if (ret < 0) {
                     printf("%s:%d (%s) [[%d]] open returning false [last_irods_error_code=%d]\n",
                             __FILE__, __LINE__, __FUNCTION__, object_identifier_, ret);
@@ -510,8 +502,6 @@ namespace irods::experimental::io::s3_transport
 
             namespace bf = boost::filesystem;
 
-            // TODO not yet tested
-
             // TODO not sure how boost::filesystem will handle this if object_key_ has a directory structure in it. test.
             bf::path cache_file =  bf::path(config_.cache_directory) / bf::path(object_key_ + "-cache");
             cache_file_path_ = cache_file.string();
@@ -522,7 +512,7 @@ namespace irods::experimental::io::s3_transport
                 return return_val;
             });
 
-
+            // first thread/process will spawn multiple threads to download object to cache
             if (!cache_file_download_started_flag) {
 
                 // go ahead and download the object to cache file
@@ -531,59 +521,32 @@ namespace irods::experimental::io::s3_transport
 
                 unsigned long long usStart = get_time_in_microseconds();
 
-                irods::thread_pool threads{config_.number_of_transfer_threads};
-
-                /*std::list<std::thread*> threads;
-                for (int thr_id=0; thr_id < config_.number_of_transfer_threads; thr_id++) {
-
-                    uint64_t this_part_size;
-                    if (thr_id == config_.number_of_transfer_threads - 1) {
-                        this_part_size = part_size + (config_.object_size - part_size * config_.number_of_transfer_threads);
-                    } else {
-                        this_part_size = part_size;
-                    }
-
-                    std::thread *this_thread= new std::thread(&s3_transport::s3_download_part_worker_routine,
-                            this, nullptr, this_part_size);
-                    threads.push_back(this_thread);
-
-                }
-
-                // Wait for threads to finish
-                while (!threads.empty()) {
-                    std::thread *this_thread= threads.front();
-                    this_thread->join();
-                    delete this_thread;
-                    threads.pop_front();
-                }*/
-
                 {
-                    int thread_cntr = 0;
-                    std::mutex thread_cntr_mutex;
-
                     irods::thread_pool threads{config_.number_of_transfer_threads};
-                    irods::thread_pool::post(threads, [this, part_size, &thread_cntr, &thread_cntr_mutex] () {
 
-                            int thr_id;
-                            {
-                                std::lock_guard<std::mutex> lock(thread_cntr_mutex);
-                                thr_id = thread_cntr++;
-                            }
+                    for (unsigned int thr_id= 0; thr_id < config_.number_of_transfer_threads; ++thr_id) {
 
-                            off_t this_part_offset = part_size * thr_id;
-                            uint64_t this_part_size;
-                            if (thr_id == config_.number_of_transfer_threads - 1) {
-                                this_part_size = part_size + (config_.object_size - part_size * config_.number_of_transfer_threads);
-                            } else {
-                                this_part_size = part_size;
-                            }
-                            this->s3_download_part_worker_routine(nullptr, this_part_size, this_part_offset);
-                    });
+                        irods::thread_pool::post(threads, [this, thr_id, part_size] () {
 
-                    shm_obj.atomic_exec([](auto& data) {
-                        data.cache_file_download_completed_flag = true;
-                    });
+                                off_t this_part_offset = part_size * thr_id;
+                                uint64_t this_part_size;
+
+                                if (thr_id == config_.number_of_transfer_threads - 1) {
+                                    this_part_size = part_size + (config_.object_size -
+                                            part_size * config_.number_of_transfer_threads);
+                                } else {
+                                    this_part_size = part_size;
+                                }
+
+                                this->s3_download_part_worker_routine(nullptr, this_part_size, this_part_offset);
+                        });
+                    }
+                    threads.join();
                 }
+
+                shm_obj.atomic_exec([](auto& data) {
+                    data.cache_file_download_completed_flag = true;
+                });
             }
 
             // download has started so we must wait until it completes before continuing
@@ -596,6 +559,8 @@ namespace irods::experimental::io::s3_transport
         }
 
         void flush_cache_file(named_shared_memory_object& shm_obj) {
+
+printf("%s:%d (%s) [[%d]] ---- flushing cache file ----\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
 
             namespace bf = boost::filesystem;
 
@@ -612,30 +577,40 @@ namespace irods::experimental::io::s3_transport
             uint64_t part_size = cache_file_size / config_.number_of_transfer_threads;
             ifs.close();
 
-
-
             {
-                int thread_cntr = 0;
-                std::mutex thread_cntr_mutex;
+                bool initiate_multipart_upload_done_flag = false;
+                std::mutex initiate_multipart_upload_done_mutex;
 
                 irods::thread_pool cache_flush_threads{config_.number_of_transfer_threads};
-                irods::thread_pool::post(cache_flush_threads, [this, part_size, &thread_cntr, &thread_cntr_mutex]() {
 
-                        int thr_id;
-                        {
-                            std::lock_guard<std::mutex> lock(thread_cntr_mutex);
-                            thr_id = thread_cntr++;
-                        }
+                for (unsigned int thr_id= 0; thr_id < config_.number_of_transfer_threads; ++thr_id) {
 
-                        uint64_t buffer_size;
-                        if (thr_id == config_.number_of_transfer_threads - 1) {
-                            buffer_size = part_size + (config_.object_size - part_size * config_.number_of_transfer_threads);
-                        } else {
-                            buffer_size = part_size;
-                        }
+                        irods::thread_pool::post(cache_flush_threads, [this, thr_id, part_size,
+                                &initiate_multipart_upload_done_flag, &initiate_multipart_upload_done_mutex] () {
+
+                                // first one in initiates
+                                {
+                                    std::lock_guard initiate_multipart_upload_lock(
+                                            initiate_multipart_upload_done_mutex);
+
+                                    if (false == initiate_multipart_upload_done_flag) {
+
+                                        // TODO make work with cache
+                                        initiate_multipart_upload();
+                                        initiate_multipart_upload_done_flag = true;
+                                    }
+
+                                }
+
+                                // read your part from cache file
+                                s3_upload_part_worker_routine(true, thr_id, part_size);
+
 
                         // TODO
                     });
+                }
+
+                cache_flush_threads.join();
             }
 
             shm_obj.atomic_exec([](auto& data) {
@@ -755,10 +730,11 @@ namespace irods::experimental::io::s3_transport
 
             if (config_.debug_flag) {
                 printf("%s:%d (%s) [[%d]] [config_.multipart_flag = %d][use_cache_ = %d]"
-                    "[O_WRONLY = %d][O_RDONLY = %d]\n",
+                    "[download_to_cache_ = %d][O_WRONLY = %d][O_RDONLY = %d]\n",
                     __FILE__, __LINE__, __FUNCTION__, object_identifier_,
                     config_.multipart_flag,
                     use_cache_,
+                    download_to_cache_,
                     (open_flags & O_ACCMODE) == O_WRONLY,
                     (open_flags & O_ACCMODE) == O_RDONLY);
             }
@@ -881,7 +857,6 @@ namespace irods::experimental::io::s3_transport
             int partContentLength = 0;
 
             data_for_write_callback data{bucket_context_, circular_buffer_};
-            memset(&data, 0, sizeof(data));
             data.debug_flag = config_.debug_flag;
             data.object_identifier = object_identifier_;
 
@@ -1128,7 +1103,14 @@ namespace irods::experimental::io::s3_transport
 
                 }
                 read_callback->content_length = length;
-                read_callback->offset = 0;
+
+                // if we are reading into cache, write to cache file at offset
+                // if reading into buffer, write at beginning of buffer
+                if (buffer == nullptr) {
+                    read_callback->offset = offset;
+                } else {
+                    read_callback->offset = 0;
+                }
                 read_callback->debug_flag = config_.debug_flag;
 
                 if (config_.debug_flag) {
@@ -1187,11 +1169,13 @@ namespace irods::experimental::io::s3_transport
 
         } // end s3_download_part_worker_routine
 
-        // this function is called in the background in a separate thread
-        void s3_upload_part_worker_routine()
+        void s3_upload_part_worker_routine(bool read_from_cache = false, int part_number = 0, int part_size = 0)
         {
             namespace bi = boost::interprocess;
             namespace types = shared_data::interprocess_types;
+
+
+            std::shared_ptr<s3_multipart_upload::callback_for_write_to_s3_base<buffer_type>> write_callback;
 
             // read upload_id from shmem
             auto shared_memory_name =  object_key_ + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
@@ -1204,88 +1188,131 @@ namespace irods::experimental::io::s3_transport
                 return data.upload_id.c_str();
             });
 
-            std::stringstream msg;
-            S3PutObjectHandler putObjectHandler
-                = { {s3_multipart_upload::part_transport_callback::on_response_properties<buffer_type>,
-                     s3_multipart_upload::part_transport_callback::on_response_completion<buffer_type> },
-                    &s3_multipart_upload::part_transport_callback::on_put_data<buffer_type> };
-
-            multipart_data partData{upload_manager_, bucket_context_, circular_buffer_};
-            upload_page<buffer_type> page;
-
-            // read the first page
-            if (config_.debug_flag) {
-                printf("%s:%d (%s) [[%d]] waiting to read\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
-            }
-            circular_buffer_.pop_front(page);
-            if (config_.debug_flag) {
-                printf("%s:%d (%s) [[%d]] read page [buffer=%p][buffer_size=%lu][terminate_flag=%d]\n",
-                        __FILE__, __LINE__, __FUNCTION__, object_identifier_, page.buffer.data(), page.buffer.size(),
-                        page.terminate_flag);
-            }
-
             int retry_cnt = 0;
-
-            // determine the sequence number from the offset, file size, and buffer size
-            // the last page might be larger so doing a little trick to handle that case (second term)
-            //  Note:  We bailed early if config_.part_size == 0
-            int sequence = (file_offset_ / config_.part_size) + (file_offset_ % config_.part_size == 0 ? 0 : 1) + 1;
-
-            // estimate the size and resize the etags vector
-            int number_of_parts = config_.object_size / config_.part_size;
-            number_of_parts = number_of_parts < sequence ? sequence : number_of_parts;
-
-            // resize the etags vector if necessary
-            int resize_error = shm_obj.atomic_exec([number_of_parts, &shm_obj](auto& data) {
-
-                if (number_of_parts > data.etags.size()) {
-                    try {
-                        data.etags.resize(number_of_parts, types::shm_char_string("", shm_obj.get_allocator()));
-                    } catch (std::bad_alloc& ba) {
-                        data.last_irods_error_code = SYS_MALLOC_ERR;
-                        return true;
-                    }
-                }
-
-                return false;
-
-            });
-
-            if (resize_error) {
-                printf("Error on reallocation of etags buffer in shared memory.");
-                return;
-            }
-
 
             do {
 
-                // Work on a local copy of the structure in case an error occurs in the middle
-                // of an upload.  If we updated in-place, on a retry the part would start
-                // at the wrong offset and length.
-                partData.mode = mpu_data_.mode;
-                partData.status = mpu_data_.status;
-                partData.enable_md5 = mpu_data_.enable_md5;
-                partData.server_encrypt = mpu_data_.server_encrypt;
-                partData.object_identifier = mpu_data_.object_identifier;
-                partData.debug_flag = config_.debug_flag;
-                partData.sequence = sequence;
-                partData.shared_memory_timeout_in_seconds = config_.shared_memory_timeout_in_seconds;
-                partData.put_object_data.saved_bucket_context = bucket_context_;
-                partData.put_object_data.buffer = page.buffer;
-                partData.put_object_data.content_length = config_.part_size;
-                partData.put_object_data.object_identifier = object_identifier_;
+                S3PutObjectHandler put_object_handler = {
+                    {
+                        s3_multipart_upload::callback_for_write_to_s3_base<buffer_type>::on_response_properties,
+                        s3_multipart_upload::callback_for_write_to_s3_base<buffer_type>::on_response_completion
+                    },
+                    s3_multipart_upload::callback_for_write_to_s3_base<buffer_type>::invoke_callback
+                };
+
+                if (read_from_cache) {
+
+                    // read from cache
+
+                    write_callback.reset(new s3_multipart_upload::callback_for_write_from_cache_to_s3<buffer_type>
+                            (bucket_context_, upload_manager_));
+
+                    s3_multipart_upload::callback_for_write_from_cache_to_s3<buffer_type>
+                        *write_callback_from_cache =
+                        static_cast<s3_multipart_upload::callback_for_write_from_cache_to_s3<buffer_type>*>
+                        (write_callback.get());
+
+                    write_callback_from_cache->set_and_open_cache_file(cache_file_path_);
+
+                    off_t offset = part_size * part_number;
+                    uint64_t content_length;
+
+                    if (part_number == config_.number_of_transfer_threads - 1) {
+                        content_length = part_size + (config_.object_size -
+                                part_size * config_.number_of_transfer_threads);
+                    } else {
+                        content_length = part_size;
+                    }
+
+                    write_callback->sequence = part_number;
+                    write_callback->content_length = content_length;
+                    write_callback->offset = offset;
+
+                } else {
+
+                    // Read from buffer
+
+                    write_callback.reset(new
+                            s3_multipart_upload::callback_for_write_from_buffer_to_s3<buffer_type>(
+                                bucket_context_, upload_manager_, circular_buffer_));
+
+                    s3_multipart_upload::callback_for_write_from_buffer_to_s3<buffer_type>
+                        *write_callback_from_buffer =
+                        static_cast<s3_multipart_upload::callback_for_write_from_buffer_to_s3<buffer_type>*>
+                        (write_callback.get());
+
+                    upload_page<buffer_type> page;
+
+                    // read the first page
+                    if (config_.debug_flag) {
+                        printf("%s:%d (%s) [[%d]] waiting to read\n",
+                                __FILE__, __LINE__, __FUNCTION__, object_identifier_);
+                    }
+                    circular_buffer_.pop_front(page);
+                    if (config_.debug_flag) {
+                        printf("%s:%d (%s) [[%d]] read page [buffer=%p][buffer_size=%lu][terminate_flag=%d]\n",
+                                __FILE__, __LINE__, __FUNCTION__, object_identifier_, page.buffer.data(),
+                                page.buffer.size(), page.terminate_flag);
+                    }
+                    write_callback_from_buffer->buffer = page.buffer;
+
+                    // determine the sequence number from the offset, file size, and buffer size
+                    // the last page might be larger so doing a little trick to handle that case (second term)
+                    //  Note:  We bailed early if config_.part_size == 0
+                    int sequence = (file_offset_ / config_.part_size) +
+                        (file_offset_ % config_.part_size == 0 ? 0 : 1) + 1;
+
+                    write_callback->sequence = sequence;
+                    write_callback->content_length = config_.part_size;
+
+
+                    // estimate the size and resize the etags vector
+                    int number_of_parts = config_.object_size / config_.part_size;
+                    number_of_parts = number_of_parts < sequence ? sequence : number_of_parts;
+
+                    // resize the etags vector if necessary
+                    int resize_error = shm_obj.atomic_exec([number_of_parts, &shm_obj](auto& data) {
+
+                        if (number_of_parts > data.etags.size()) {
+                            try {
+                                data.etags.resize(number_of_parts, types::shm_char_string("", shm_obj.get_allocator()));
+                            } catch (std::bad_alloc& ba) {
+                                data.last_irods_error_code = SYS_MALLOC_ERR;
+                                return true;
+                            }
+                        }
+
+                        return false;
+
+                    });
+
+                    if (resize_error) {
+                        printf("Error on reallocation of etags buffer in shared memory.");
+                        return;
+                    }
+                }
+
+                write_callback->debug_flag = config_.debug_flag;
+                write_callback->enable_md5 = config_.enable_md5_flag;
+                write_callback->server_encrypt = config_.server_encrypt_flag;
+                write_callback->object_identifier = object_identifier_;
+                write_callback->shared_memory_timeout_in_seconds = constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS;
+                write_callback->object_identifier = object_identifier_;
+                write_callback->object_key = object_key_;
+
+                std::stringstream msg;
 
                 if (config_.debug_flag) {
                     std::stringstream msg;
-                    msg << "Multipart:  Start part " << static_cast<int>(sequence) << ", key \""
+                    msg << "Multipart:  Start part " << static_cast<int>(write_callback->sequence) << ", key \""
                         << object_key_ << "\", uploadid \"" << upload_id
-                        << "\", len " << static_cast<int>(partData.put_object_data.content_length);
+                        << "\", len " << static_cast<int>(write_callback->content_length);
                     printf( "%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_,
                             msg.str().c_str() );
                 }
 
+                S3PutProperties putProps;
                 put_props_.md5 = nullptr;
-                //S3PutProperties putProps;
                 //if ( partData.enable_md5 ) {
                 //    // jjames - not sure how to do MD5 piecewise
                 //    putProps->md5 = s3CalcMD5( partData.put_object_data.fd,
@@ -1298,16 +1325,16 @@ namespace irods::experimental::io::s3_transport
                 if (config_.debug_flag) {
                     printf("%s:%d (%s) [[%d]] S3_upload_part (ctx, key, props, handler, %d, "
                            "uploadId, %lu, 0, partData)\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_,
-                           sequence, partData.put_object_data.content_length);
+                           write_callback->sequence, write_callback->content_length);
                 }
 
                 S3_upload_part(&bucket_context_, object_key_.c_str(), &put_props_,
-                        &putObjectHandler, sequence, upload_id.c_str(),
-                        config_.part_size, 0, &partData);
+                        &put_object_handler, write_callback->sequence, upload_id.c_str(),
+                        config_.part_size, 0, write_callback.get());
 
                 if (config_.debug_flag) {
                     printf("%s:%d (%s) [[%d]] S3_upload_part returned [part=%d].\n",
-                            __FILE__, __LINE__, __FUNCTION__, object_identifier_, sequence);
+                            __FILE__, __LINE__, __FUNCTION__, object_identifier_, write_callback->sequence);
                 }
 
                 unsigned long long usEnd = get_time_in_microseconds();
@@ -1320,11 +1347,11 @@ namespace irods::experimental::io::s3_transport
                     printf( "%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_,
                             msg.str().c_str() );
                 }
-                if (partData.status != S3StatusOK) s3_sleep( config_.retry_wait_seconds, 0 );
-            } while ((partData.status != S3StatusOK) && S3_status_is_retryable(partData.status) &&
+                if (write_callback->status != S3StatusOK) s3_sleep( config_.retry_wait_seconds, 0 );
+            } while ((write_callback->status != S3StatusOK) && S3_status_is_retryable(write_callback->status) &&
                     (++retry_cnt < config_.retry_count_limit));
 
-            if (partData.status != S3StatusOK) {
+            if (write_callback->status != S3StatusOK) {
 
                 shm_obj.atomic_exec([](auto& data) {
                     data.last_irods_error_code = S3_PUT_ERROR;
@@ -1333,22 +1360,6 @@ namespace irods::experimental::io::s3_transport
         }
 
         const config&                config_;
-            /*, config_.object_size{_config.object_size}
-            , config_.number_of_transfer_threads{_config.number_of_transfer_threads}
-            , config_.part_size{_config.part_size}
-            , config_.retry_count_limit{_config.retry_count_limit}
-            , config_.retry_wait_seconds{_config.retry_wait_seconds}
-            , config_.hostname{_config.hostname}
-            , config_.bucket_name{_config.bucket_name}
-            , config_.access_key{_config.access_key}
-            , config_.secret_access_key{_config.secret_access_key}
-            , config_.multipart_flag{_config.multipart_flag}
-            , config_.shared_memory_timeout_in_seconds{_config.shared_memory_timeout_in_seconds}
-            , config_.enable_md5_flag{_config.enable_md5_flag}
-            , config_.server_encrypt_flag{_config.server_encrypt_flag}
-            , config_.cache_directory{_config.cache_directory}
-            , config_.debug_flag{_config.debug_flag}*/
-
         int                          fd_;
         nlohmann::json               fd_info_;
         std::string                  object_key_;
@@ -1356,7 +1367,6 @@ namespace irods::experimental::io::s3_transport
         upload_manager               upload_manager_;
         S3SignatureVersion           s3_signature_version_;
 
-        multipart_data<buffer_type>  mpu_data_;
         bool                         call_s3_upload_part_flag_;
         bool                         call_s3_download_part_flag_;
         S3PutProperties              put_props_;

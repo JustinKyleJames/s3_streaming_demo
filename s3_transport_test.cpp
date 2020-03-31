@@ -13,6 +13,7 @@ const long transfer_buffer_size_for_parallel_transfer_in_megabytes = 4;
 
 using odstream            = irods::experimental::io::odstream;
 using idstream            = irods::experimental::io::idstream;
+using dstream             = irods::experimental::io::dstream;
 using s3_transport        = irods::experimental::io::s3_transport::s3_transport<char>;
 using s3_transport_config = irods::experimental::io::s3_transport::config;
 
@@ -24,9 +25,14 @@ void download_part(int thread_number, const int thread_count, const uint32_t fil
           const bool debug_flag, const char *hostname, const char *bucket_name,
           const char *access_key, const char *secret_access_key, const char *filename);
 
+void open_file_with_read_write(int thread_number, const int thread_count, const uint32_t file_size,
+                               const bool debug_flag, const char *hostname,
+                               const char *bucket_name, const char * access_key,
+                               const char *secret_access_key, const char *filename);
+
 void usage()
 {
-    std::cerr << "Usage:  s3_transport_test <config_file> <upload_file> [upload|download|both]"
+    std::cerr << "Usage:  s3_transport_test <config_file> <upload_file> [upload|download|both|rw]"
               << std::endl;
 }
 
@@ -47,8 +53,8 @@ int main(int argc, char **argv)
     std::string mode = "both";
     if (argc >= 4) {
         mode = argv[3];
-        if (mode != "upload" && mode != "download" && mode != "both") {
-            std::cerr << "mode must be upload|download|both" << std::endl;
+        if (mode != "upload" && mode != "download" && mode != "both" && mode != "rw") {
+            std::cerr << "mode must be upload|download|both|rw" << std::endl;
             usage();
         }
     }
@@ -292,8 +298,69 @@ int main(int argc, char **argv)
 
     }
 
+    if (mode == "rw") {
+
+        std::thread *rw_threads = new std::thread[thread_count];
+
+        for (int thread_number = 0; thread_number <  thread_count; ++thread_number) {
+            printf("%s:%d (%s) start reader thread %d\n", __FILE__, __LINE__, __FUNCTION__,
+                    thread_number);
+            rw_threads[thread_number] = std::move(std::thread(open_file_with_read_write, thread_number,
+                        thread_count, file_size, debug_flag, hostname.c_str(), bucket_name.c_str(),
+                        access_key.c_str(), secret_access_key.c_str(), filename.c_str()));
+        }
+
+
+        for (int thread_number = 0; thread_number <  thread_count; ++thread_number) {
+
+            printf("%s:%d (%s) calling join for rw thread %d\n", __FILE__, __LINE__,
+                    __FUNCTION__, thread_number);
+
+            rw_threads[thread_number].join();
+
+            printf("%s:%d (%s) joined wr thread %d\n", __FILE__, __LINE__,
+                    __FUNCTION__, thread_number);
+        }
+
+        delete[] rw_threads;
+    }
+
     return 0;
 
+}
+
+// to test downloading file to cache
+void open_file_with_read_write(int thread_number,
+                               const int thread_count,
+                               const uint32_t file_size,
+                               const bool debug_flag,
+                               const char *hostname,
+                               const char *bucket_name,
+                               const char * access_key,
+                               const char *secret_access_key,
+                               const char *filename)
+{
+
+    printf("%s:%d (%s) [open file for read/write thread=%u, seq=%u]\n",
+            __FILE__, __LINE__, __FUNCTION__, thread_number, thread_number);
+
+    s3_transport_config s3_config;
+    s3_config.object_size = file_size;
+    s3_config.number_of_transfer_threads = 5;
+    s3_config.bucket_name = bucket_name;
+    s3_config.access_key = access_key;
+    s3_config.secret_access_key = secret_access_key;
+    s3_config.object_identifier = thread_number;
+    s3_config.debug_flag = debug_flag;
+
+    s3_transport tp1{s3_config};
+    dstream ds1{tp1, filename};
+    ds1.seekp(0);
+
+
+    // will be automatic
+    ds1.close();
+    printf("CLOSE DONE FOR %d\n", thread_number);
 }
 
 void upload_part(int thread_number,

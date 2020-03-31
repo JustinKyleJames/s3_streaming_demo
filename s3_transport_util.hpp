@@ -142,7 +142,7 @@ namespace irods::experimental::io::s3_transport
         libs3_types::status status;
 
         libs3_types::bucket_context&
-                            saved_bucket_context;   /* To enable more detailed error messages */
+                            saved_bucket_context;   // To enable more detailed error messages
         bool                debug_flag;
         int                 object_identifier;
     };

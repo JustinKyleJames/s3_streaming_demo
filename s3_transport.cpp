@@ -134,24 +134,28 @@ namespace irods::experimental::io::s3_transport
                 using named_shared_memory_object =
                     irods::experimental::interprocess::shared_memory::named_shared_memory_object
                     <shared_data::multipart_shared_data>;
-
                 // upload upload_id in shared memory
                 // no need to shared_memory_lock as this should already be locked
 
+                // upload upload_id in shared memory
                 upload_manager *manager = (upload_manager *)callback_data;
 
+                // upload upload_id in shared memory
                 // upload upload_id in shared memory
                 std::string& object_key = manager->object_key;
                 auto shared_memory_name =  object_key + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
 
+                // upload upload_id in shared memory
                 named_shared_memory_object shm_obj{shared_memory_name,
                     constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS,
                     constants::MAX_S3_SHMEM_SIZE};
 
-                shm_obj.atomic_exec([upload_id](auto& data) {
+                // upload upload_id in shared memory - already locked here
+                shm_obj.exec([upload_id](auto& data) {
                     data.upload_id = upload_id;
                 });
 
+                // upload upload_id in shared memory
                 return S3StatusOK;
             } // end on_response
 
