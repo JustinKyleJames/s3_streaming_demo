@@ -284,44 +284,42 @@ namespace irods::experimental::io::s3_transport
             // do close processing if # files open = 0
             //  - for multipart upload send the complete message
             //  - if using a cache file flush the cache and delete cache file
-            bool close_processing_success_flag = shm_obj.atomic_exec([this, &file_open_counter, &shm_obj, open_flags](auto& data) {
+            file_open_counter = shm_obj.atomic_exec([](auto& data) {
+                return  data.file_open_counter > 0 ? --(data.file_open_counter) : 0;
+            });
 
-                file_open_counter = data.file_open_counter > 0 ? --(data.file_open_counter) : 0;
+            if (config_.debug_flag) {
+                printf("%s:%d (%s) [[%d]] [file_open_counter=%d]\n",
+                        __FILE__, __LINE__, __FUNCTION__, object_identifier_,
+                        file_open_counter);
+            }
 
-                if (file_open_counter == 0) {
+            if (file_open_counter == 0 && use_cache_) {
 
-                    if (use_cache_) {
+                flush_cache_file(shm_obj);
+                shm_obj.remove();
 
-                        flush_cache_file(shm_obj);
+            } else if (file_open_counter == 0) {
 
+                bool close_processing_success_flag = shm_obj.atomic_exec(
+                        [this, &shm_obj, open_flags](auto& data) {
 
-                    } else if ( is_full_multipart_upload(open_flags) ) {
+                    if ( is_full_multipart_upload(open_flags) ) {
                         if (0 > complete_multipart_upload()) {
                             // error - remove shmem object
-                            shm_obj.remove();
                             return false;
                         }
                     }
 
-                    if (config_.debug_flag) {
-                        printf("%s:%d (%s) [[%d]] [file_open_counter=%d]\n",
-                                __FILE__, __LINE__, __FUNCTION__, object_identifier_,
-                                file_open_counter);
-                    }
+                    return true;
 
-                }
+                });
 
-                return true;
-
-            });
-
-            // TODO is this opening up to a race condition around file_open_counter and shm_obj?
-            if (file_open_counter == 0) {
                 shm_obj.remove();
-            }
 
-            if (!close_processing_success_flag) {
-                return close_processing_success_flag;
+                if (!close_processing_success_flag) {
+                    return close_processing_success_flag;
+                }
             }
 
             // each process must initialize and deinitiatize.
@@ -577,45 +575,24 @@ printf("%s:%d (%s) [[%d]] ---- flushing cache file ----\n", __FILE__, __LINE__, 
             uint64_t part_size = cache_file_size / config_.number_of_transfer_threads;
             ifs.close();
 
-            {
-                bool initiate_multipart_upload_done_flag = false;
-                std::mutex initiate_multipart_upload_done_mutex;
+            initiate_multipart_upload();
 
-                irods::thread_pool cache_flush_threads{config_.number_of_transfer_threads};
+            //bool initiate_multipart_upload_done_flag = false;
+            //std::mutex initiate_multipart_upload_done_mutex;
 
-                for (unsigned int thr_id= 0; thr_id < config_.number_of_transfer_threads; ++thr_id) {
+            irods::thread_pool cache_flush_threads{config_.number_of_transfer_threads};
 
-                        irods::thread_pool::post(cache_flush_threads, [this, thr_id, part_size,
-                                &initiate_multipart_upload_done_flag, &initiate_multipart_upload_done_mutex] () {
+            for (unsigned int thr_id= 0; thr_id < config_.number_of_transfer_threads; ++thr_id) {
 
-                                // first one in initiates
-                                {
-                                    std::lock_guard initiate_multipart_upload_lock(
-                                            initiate_multipart_upload_done_mutex);
-
-                                    if (false == initiate_multipart_upload_done_flag) {
-
-                                        // TODO make work with cache
-                                        initiate_multipart_upload();
-                                        initiate_multipart_upload_done_flag = true;
-                                    }
-
-                                }
-
-                                // read your part from cache file
-                                s3_upload_part_worker_routine(true, thr_id, part_size);
-
-
-                        // TODO
-                    });
-                }
-
-                cache_flush_threads.join();
+                    irods::thread_pool::post(cache_flush_threads, [this, thr_id, part_size] () {
+                            // upload part and read your part from cache file
+                            s3_upload_part_worker_routine(true, thr_id, part_size);
+                });
             }
 
-            shm_obj.atomic_exec([](auto& data) {
-                data.cache_file_download_completed_flag = true;
-            });
+            cache_flush_threads.join();
+
+            complete_multipart_upload();
 
         }
 
@@ -853,8 +830,6 @@ printf("%s:%d (%s) [[%d]] ---- flushing cache file ----\n", __FILE__, __LINE__, 
             upload_manager_.xml = "";
 
             msg.str( std::string() ); // Clear
-
-            int partContentLength = 0;
 
             data_for_write_callback data{bucket_context_, circular_buffer_};
             data.debug_flag = config_.debug_flag;
@@ -1174,22 +1149,27 @@ printf("%s:%d (%s) [[%d]] ---- flushing cache file ----\n", __FILE__, __LINE__, 
             namespace bi = boost::interprocess;
             namespace types = shared_data::interprocess_types;
 
+printf("%s:%d (%s) [[%d]] [part_number=%d]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, part_number);
 
             std::shared_ptr<s3_multipart_upload::callback_for_write_to_s3_base<buffer_type>> write_callback;
 
             // read upload_id from shmem
             auto shared_memory_name =  object_key_ + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
 
+printf("%s:%d (%s) [[%d]] [part_number=%d]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, part_number);
             named_shared_memory_object shm_obj{shared_memory_name,
                 constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS,
                 constants::MAX_S3_SHMEM_SIZE};
 
+printf("%s:%d (%s) [[%d]] [part_number=%d]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, part_number);
             std::string upload_id =  shm_obj.atomic_exec([](auto& data) {
                 return data.upload_id.c_str();
             });
 
+printf("%s:%d (%s) [[%d]] [part_number=%d]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, part_number);
             int retry_cnt = 0;
 
+printf("%s:%d (%s) [[%d]] [part_number=%d]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, part_number);
             do {
 
                 S3PutObjectHandler put_object_handler = {
@@ -1224,9 +1204,10 @@ printf("%s:%d (%s) [[%d]] ---- flushing cache file ----\n", __FILE__, __LINE__, 
                         content_length = part_size;
                     }
 
-                    write_callback->sequence = part_number;
+                    write_callback->sequence = part_number + 1;
                     write_callback->content_length = content_length;
                     write_callback->offset = offset;
+printf("%s:%d (%s) [[%d]] [sequence=%d]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, write_callback->sequence);
 
                 } else {
 
@@ -1292,6 +1273,7 @@ printf("%s:%d (%s) [[%d]] ---- flushing cache file ----\n", __FILE__, __LINE__, 
                     }
                 }
 
+printf("%s:%d (%s) [[%d]] [sequence=%d]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, write_callback->sequence);
                 write_callback->debug_flag = config_.debug_flag;
                 write_callback->enable_md5 = config_.enable_md5_flag;
                 write_callback->server_encrypt = config_.server_encrypt_flag;
@@ -1328,10 +1310,12 @@ printf("%s:%d (%s) [[%d]] ---- flushing cache file ----\n", __FILE__, __LINE__, 
                            write_callback->sequence, write_callback->content_length);
                 }
 
+printf("%s:%d (%s) [[%d]] [sequence=%d]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, write_callback->sequence);
                 S3_upload_part(&bucket_context_, object_key_.c_str(), &put_props_,
                         &put_object_handler, write_callback->sequence, upload_id.c_str(),
-                        config_.part_size, 0, write_callback.get());
+                        write_callback->content_length, 0, write_callback.get());
 
+printf("%s:%d (%s) [[%d]] [sequence=%d][return %d]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, write_callback->sequence, write_callback->status == S3StatusOK);
                 if (config_.debug_flag) {
                     printf("%s:%d (%s) [[%d]] S3_upload_part returned [part=%d].\n",
                             __FILE__, __LINE__, __FUNCTION__, object_identifier_, write_callback->sequence);

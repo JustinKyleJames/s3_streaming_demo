@@ -355,14 +355,25 @@ namespace irods::experimental::io::s3_transport
                         cache_fstream.open(filename.c_str(), std::ios_base::in);
                     }
 
-                    // writing cache file to s3
+                    // writing cache file to s3 buffer
+                    auto length_to_read_from_cache = this->content_length - this->bytes_written
+                        > libs3_buffer_size
+                        ? libs3_buffer_size
+                        : this->content_length - this->bytes_written;
+printf("%s:%d (%s) [[%d]] [part=%d] [offset==%lu][content_length=%lu][length_to_read=%lu]\n", __FILE__, __LINE__, __FUNCTION__, this->object_identifier, this->sequence, this->offset, this->content_length, length_to_read_from_cache);
+
                     cache_fstream.seekg(this->offset);
-                    cache_fstream.read(libs3_buffer, libs3_buffer_size);
+                    cache_fstream.read(libs3_buffer, length_to_read_from_cache);
 
-                    auto read = static_cast<uint64_t>(cache_fstream.tellg()) - this->offset;
-                    if (read > 0) this->offset += read;
+                    auto bytes_read_from_cache = static_cast<uint64_t>(cache_fstream.tellg()) - this->offset;
+                    if (bytes_read_from_cache > 0) {
+                        this->offset += bytes_read_from_cache;
+                        this->bytes_written += bytes_read_from_cache;
+                    }
 
-                    return read;
+printf("%s:%d (%s) [[%d]] [part=%d] [bytes_read=%lu][new offset=%lu]\n", __FILE__, __LINE__, __FUNCTION__, this->object_identifier, this->sequence, bytes_read_from_cache, this->offset);
+
+                    return bytes_read_from_cache;
 
                 }
 
@@ -441,6 +452,7 @@ namespace irods::experimental::io::s3_transport
                     this->offset += length;
                     bytes_written += length;
 
+printf("%s:%d (%s) [[%d]] [part=%d] [bytes_read=%lu][new offset=%lu]\n", __FILE__, __LINE__, __FUNCTION__, this->object_identifier, this->sequence, length, this->offset);
                     return length;
 
                 }
