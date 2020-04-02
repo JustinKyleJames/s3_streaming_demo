@@ -355,8 +355,12 @@ void open_file_with_read_write(int thread_number,
 
     s3_transport tp1{s3_config};
     dstream ds1{tp1, filename};
-    ds1.seekp(0);
+    ds1.seekp(0, std::ios_base::end);
 
+    if (thread_number == 0) {
+        std::string write_string = "adding this to end\n";
+        ds1.write(write_string.c_str(), write_string.length());
+    }
 
     // will be automatic
     ds1.close();

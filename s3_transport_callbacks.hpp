@@ -122,7 +122,11 @@ namespace irods::experimental::io::s3_transport
 
             }
 
-            ~callback_for_read_from_s3_to_cache() {};
+            ~callback_for_read_from_s3_to_cache() {
+                if (cache_fstream.is_open()) {
+                    cache_fstream.close();
+                }
+            };
 
             void set_and_open_cache_file(std::string& f)
             {
@@ -360,7 +364,7 @@ namespace irods::experimental::io::s3_transport
                         > libs3_buffer_size
                         ? libs3_buffer_size
                         : this->content_length - this->bytes_written;
-printf("%s:%d (%s) [[%d]] [part=%d] [offset==%lu][content_length=%lu][length_to_read=%lu]\n", __FILE__, __LINE__, __FUNCTION__, this->object_identifier, this->sequence, this->offset, this->content_length, length_to_read_from_cache);
+//printf("%s:%d (%s) [[%d]] [part=%d] [offset==%lu][content_length=%lu][length_to_read=%lu]\n", __FILE__, __LINE__, __FUNCTION__, this->object_identifier, this->sequence, this->offset, this->content_length, length_to_read_from_cache);
 
                     cache_fstream.seekg(this->offset);
                     cache_fstream.read(libs3_buffer, length_to_read_from_cache);
@@ -371,13 +375,17 @@ printf("%s:%d (%s) [[%d]] [part=%d] [offset==%lu][content_length=%lu][length_to_
                         this->bytes_written += bytes_read_from_cache;
                     }
 
-printf("%s:%d (%s) [[%d]] [part=%d] [bytes_read=%lu][new offset=%lu]\n", __FILE__, __LINE__, __FUNCTION__, this->object_identifier, this->sequence, bytes_read_from_cache, this->offset);
+//printf("%s:%d (%s) [[%d]] [part=%d] [bytes_read=%lu][new offset=%lu]\n", __FILE__, __LINE__, __FUNCTION__, this->object_identifier, this->sequence, bytes_read_from_cache, this->offset);
 
                     return bytes_read_from_cache;
 
                 }
 
-                ~callback_for_write_from_cache_to_s3() {};
+                ~callback_for_write_from_cache_to_s3() {
+                    if (cache_fstream.is_open()) {
+                        cache_fstream.close();
+                    }
+                };
 
                 void set_and_open_cache_file(std::string& f)
                 {
@@ -452,7 +460,7 @@ printf("%s:%d (%s) [[%d]] [part=%d] [bytes_read=%lu][new offset=%lu]\n", __FILE_
                     this->offset += length;
                     bytes_written += length;
 
-printf("%s:%d (%s) [[%d]] [part=%d] [bytes_read=%lu][new offset=%lu]\n", __FILE__, __LINE__, __FUNCTION__, this->object_identifier, this->sequence, length, this->offset);
+//printf("%s:%d (%s) [[%d]] [part=%d] [bytes_read=%lu][new offset=%lu]\n", __FILE__, __LINE__, __FUNCTION__, this->object_identifier, this->sequence, length, this->offset);
                     return length;
 
                 }
@@ -474,7 +482,7 @@ printf("%s:%d (%s) [[%d]] [part=%d] [bytes_read=%lu][new offset=%lu]\n", __FILE_
         namespace cancel_callback
         {
             libs3_types::status on_response_properties (const libs3_types::response_properties *properties,
-                                                     void *callback_data);
+                                                        void *callback_data);
 
             // S3_abort_multipart_upload() does not allow a callback_data parameter, so pass the
             // final operation status using this global.

@@ -322,6 +322,13 @@ namespace irods::experimental::io::s3_transport
                 }
             }
 
+            // if using cache, go ahead and close the fstream
+            if (use_cache_) {
+                if (cache_fstream_.is_open()) {
+                    cache_fstream_.close();
+                }
+            }
+
             // each process must initialize and deinitiatize.
             {
                 std::lock_guard<std::mutex> lock(s3_initialized_counter_mutex_);
@@ -331,11 +338,18 @@ namespace irods::experimental::io::s3_transport
             }
 
             return true;
-        }
+                     }
 
         std::streamsize receive(char_type* _buffer,
                                 std::streamsize _buffer_size) override
         {
+            if (use_cache_) {
+                auto position_before_read = cache_fstream_.tellg();
+                cache_fstream_.read(_buffer, _buffer_size);
+                return cache_fstream_.tellg() - position_before_read;
+            }
+
+            // Not using cache.
             // just get what is asked for
             s3_download_part_worker_routine(_buffer, _buffer_size);
             return _buffer_size;
@@ -345,6 +359,23 @@ namespace irods::experimental::io::s3_transport
                              std::streamsize _buffer_size) override
         {
 
+            if (use_cache_) {
+                auto position_before_write = cache_fstream_.tellp();
+                cache_fstream_.write(_buffer, _buffer_size);
+
+                // calculate the new size of the file
+                auto current_position = cache_fstream_.tellp();
+                cache_fstream_.seekp(0, std::ios_base::end);
+                auto new_size = cache_fstream_.tellp();
+
+                // seek back to current position
+                cache_fstream_.seekp(current_position, std::ios_base::beg);
+
+                // return bytes written
+                return current_position - position_before_write;
+            }
+
+            // Not using cache.
             // Put the buffer on the circular buffer.
             // We must copy the buffer because it will persist after send returns.
             buffer_type copied_buffer(_buffer, _buffer + _buffer_size);
@@ -380,29 +411,10 @@ namespace irods::experimental::io::s3_transport
 
             if (use_cache_) {
 
-                // we are using a cache file so just seek on it
-
-                int return_val;
-                switch (_dir) {
-                    cache_fstream_.seekg(_offset, _dir);
-                    return cache_fstream_.tellg();
-                    /*case std::ios_base::beg:
-                        cache_fstream_.seekg(offset);
-                        return tellg();
-
-                    case std::ios_base::cur:
-                        cache_fstream_.seekg(offset, std::ios_base::cur);
-                        return tellg();
-                        //return lseek(cache_fd_, _offset, SEEK_CUR);
-
-                    case std::ios_base::end:
-                        cache_fstream_.seekg(offset, std::ios_base::end);
-                        return tellg();
-                        //return lseek(cache_fd_, _offset, SEEK_END);*/
-
-                    default:
-                        return seek_error;
-                }
+                // we are using a cache file so just seek on it,
+                cache_fstream_.seekg(_offset, _dir);
+                cache_fstream_.seekp(_offset, _dir);
+                return cache_fstream_.tellg();
 
             } else {
 
@@ -416,6 +428,7 @@ namespace irods::experimental::io::s3_transport
                         break;
 
                     case std::ios_base::end:
+
                         file_offset_ = config_.object_size + _offset;
                         break;
 
@@ -429,7 +442,11 @@ namespace irods::experimental::io::s3_transport
 
         bool is_open() const noexcept override
         {
-            return fd_ >= minimum_valid_file_descriptor;
+            if (use_cache_) {
+                return cache_fstream_.is_open();
+            } else {
+                return fd_ >= minimum_valid_file_descriptor;
+            }
         }
 
         int file_descriptor() const noexcept override
@@ -457,6 +474,15 @@ namespace irods::experimental::io::s3_transport
         }
 
     private:
+
+        auto get_cache_file_size() -> uint64_t
+        {
+            auto current_position = cache_fstream_.tellp();
+            cache_fstream_.seekp(0, std::ios_base::end);
+            auto cache_file_size = cache_fstream_.tellp();
+            cache_fstream_.seekp(current_position, std::ios_base::beg);
+            return cache_file_size;
+        }
 
         bool perform_multipart_upload(named_shared_memory_object& shm_obj, const int& file_open_counter)
         {
@@ -513,7 +539,10 @@ namespace irods::experimental::io::s3_transport
             // first thread/process will spawn multiple threads to download object to cache
             if (!cache_file_download_started_flag) {
 
-                // go ahead and download the object to cache file
+                // download the object to a cache file
+
+                // Note:  Using the object size passed in (config_.object_size) as no
+                // writes/truncates have been performed at this point.
 
                 uint64_t part_size = config_.object_size / config_.number_of_transfer_threads;
 
@@ -557,8 +586,6 @@ namespace irods::experimental::io::s3_transport
         }
 
         void flush_cache_file(named_shared_memory_object& shm_obj) {
-
-printf("%s:%d (%s) [[%d]] ---- flushing cache file ----\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_);
 
             namespace bf = boost::filesystem;
 
@@ -681,6 +708,7 @@ printf("%s:%d (%s) [[%d]] ---- flushing cache file ----\n", __FILE__, __LINE__, 
         {
             namespace bi = boost::interprocess;
             namespace types = shared_data::interprocess_types;
+            namespace bf = boost::filesystem;
 
             if (config_.debug_flag) {
                 printf("%s:%d (%s) [[%d]] [_mode & in = %d][_mode & out = %d]"
@@ -789,17 +817,47 @@ printf("%s:%d (%s) [[%d]] ---- flushing cache file ----\n", __FILE__, __LINE__, 
 
             }
 
-            const auto fd = file_descriptor_counter_++;
+            if (use_cache_) {
 
-            if (fd < minimum_valid_file_descriptor) {
-                return false;
-            }
+                // using cache, open the cache file for subsequent reads/writes
+                // use the mode that was passed in
 
-            fd_ = fd;
+                if (!cache_fstream_.is_open()) {
 
-            if (!seek_to_end_if_required(mode_)) {
-                close();
-                return false;
+                    bf::path cache_file =  bf::path(config_.cache_directory) / bf::path(object_key_ + "-cache");
+                    cache_file_path_ = cache_file.string();
+
+                    cache_fstream_.exceptions ( std::fstream::failbit | std::fstream::badbit );
+
+                    try {
+                        cache_fstream_.open(cache_file_path_.c_str(), _mode);
+                    } catch (std::fstream::failure e) {
+                        fprintf(stderr, "Failed to open cache file.\n");
+                        return false;
+                    }
+
+                    if (!seek_to_end_if_required(mode_)) {
+                        return false;
+                    }
+
+                }
+
+            } else {
+
+                // not using cache, just create our own fd
+
+                const auto fd = file_descriptor_counter_++;
+
+                if (fd < minimum_valid_file_descriptor) {
+                    return false;
+                }
+
+                fd_ = fd;
+
+                if (!seek_to_end_if_required(mode_)) {
+                    close();
+                    return false;
+                }
             }
 
             return true;
@@ -1149,27 +1207,22 @@ printf("%s:%d (%s) [[%d]] ---- flushing cache file ----\n", __FILE__, __LINE__, 
             namespace bi = boost::interprocess;
             namespace types = shared_data::interprocess_types;
 
-printf("%s:%d (%s) [[%d]] [part_number=%d]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, part_number);
 
             std::shared_ptr<s3_multipart_upload::callback_for_write_to_s3_base<buffer_type>> write_callback;
 
             // read upload_id from shmem
             auto shared_memory_name =  object_key_ + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
 
-printf("%s:%d (%s) [[%d]] [part_number=%d]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, part_number);
             named_shared_memory_object shm_obj{shared_memory_name,
                 constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS,
                 constants::MAX_S3_SHMEM_SIZE};
 
-printf("%s:%d (%s) [[%d]] [part_number=%d]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, part_number);
             std::string upload_id =  shm_obj.atomic_exec([](auto& data) {
                 return data.upload_id.c_str();
             });
 
-printf("%s:%d (%s) [[%d]] [part_number=%d]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, part_number);
             int retry_cnt = 0;
 
-printf("%s:%d (%s) [[%d]] [part_number=%d]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, part_number);
             do {
 
                 S3PutObjectHandler put_object_handler = {
@@ -1197,8 +1250,11 @@ printf("%s:%d (%s) [[%d]] [part_number=%d]\n", __FILE__, __LINE__, __FUNCTION__,
                     off_t offset = part_size * part_number;
                     uint64_t content_length;
 
+                    // get the object size from the cache file
+                    auto object_size = get_cache_file_size();
+
                     if (part_number == config_.number_of_transfer_threads - 1) {
-                        content_length = part_size + (config_.object_size -
+                        content_length = part_size + (object_size -
                                 part_size * config_.number_of_transfer_threads);
                     } else {
                         content_length = part_size;
@@ -1207,7 +1263,6 @@ printf("%s:%d (%s) [[%d]] [part_number=%d]\n", __FILE__, __LINE__, __FUNCTION__,
                     write_callback->sequence = part_number + 1;
                     write_callback->content_length = content_length;
                     write_callback->offset = offset;
-printf("%s:%d (%s) [[%d]] [sequence=%d]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, write_callback->sequence);
 
                 } else {
 
@@ -1273,7 +1328,6 @@ printf("%s:%d (%s) [[%d]] [sequence=%d]\n", __FILE__, __LINE__, __FUNCTION__, ob
                     }
                 }
 
-printf("%s:%d (%s) [[%d]] [sequence=%d]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, write_callback->sequence);
                 write_callback->debug_flag = config_.debug_flag;
                 write_callback->enable_md5 = config_.enable_md5_flag;
                 write_callback->server_encrypt = config_.server_encrypt_flag;
@@ -1310,12 +1364,10 @@ printf("%s:%d (%s) [[%d]] [sequence=%d]\n", __FILE__, __LINE__, __FUNCTION__, ob
                            write_callback->sequence, write_callback->content_length);
                 }
 
-printf("%s:%d (%s) [[%d]] [sequence=%d]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, write_callback->sequence);
                 S3_upload_part(&bucket_context_, object_key_.c_str(), &put_props_,
                         &put_object_handler, write_callback->sequence, upload_id.c_str(),
                         write_callback->content_length, 0, write_callback.get());
 
-printf("%s:%d (%s) [[%d]] [sequence=%d][return %d]\n", __FILE__, __LINE__, __FUNCTION__, object_identifier_, write_callback->sequence, write_callback->status == S3StatusOK);
                 if (config_.debug_flag) {
                     printf("%s:%d (%s) [[%d]] S3_upload_part returned [part=%d].\n",
                             __FILE__, __LINE__, __FUNCTION__, object_identifier_, write_callback->sequence);
