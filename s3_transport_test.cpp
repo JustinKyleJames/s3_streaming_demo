@@ -355,11 +355,33 @@ void open_file_with_read_write(int thread_number,
 
     s3_transport tp1{s3_config};
     dstream ds1{tp1, filename};
-    ds1.seekp(0, std::ios_base::end);
 
     if (thread_number == 0) {
+
+        // test offset write
+        ds1.seekp(0, std::ios_base::end);
         std::string write_string = "adding this to end\n";
         ds1.write(write_string.c_str(), write_string.length());
+
+        // test offset read
+        char read_str[21];
+        read_str[20] = 0;
+        printf("------ read 20 bytes at offset 10 -----\n");
+        ds1.seekg(10, std::ios_base::beg);
+        ds1.read(read_str, 20);
+        printf("[%s]\n", read_str);
+        printf("------ read 20 more bytes         -----\n");
+        ds1.read(read_str, 20);
+        printf("[%s]\n", read_str);
+        printf("------ read 20 more bytes skip 10 -----\n");
+        ds1.seekg(10, std::ios_base::cur);
+        ds1.read(read_str, 20);
+        printf("[%s]\n", read_str);
+        printf("------ read last 20 bytes         -----\n");
+        ds1.seekg(-20, std::ios_base::end);
+        ds1.read(read_str, 20);
+        printf("[%s]\n", read_str);
+        printf("---------------------------------------\n");
     }
 
     // will be automatic

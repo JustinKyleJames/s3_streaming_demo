@@ -413,7 +413,7 @@ namespace irods::experimental::io::s3_transport
 
                 // we are using a cache file so just seek on it,
                 cache_fstream_.seekg(_offset, _dir);
-                cache_fstream_.seekp(_offset, _dir);
+                //cache_fstream_.seekp(_offset, _dir);
                 return cache_fstream_.tellg();
 
             } else {
