@@ -34,12 +34,11 @@ namespace irods::experimental::interprocess
                     , last_access_time_in_seconds(access_time)
                 {}
 
-                // T must have reset_fields()
+                // T must have reset_fields() and ref_count
                 T thing;
 
                 time_t last_access_time_in_seconds;
-                // TODO rename to something like access_mutex
-                bi::interprocess_recursive_mutex mtx;
+                bi::interprocess_recursive_mutex access_mutex;
 
             };
 
@@ -68,6 +67,8 @@ namespace irods::experimental::interprocess
                     (  static_cast<void_allocator>(shm_.get_segment_manager()), now,
                        std::forward<Args>(args)...);
 
+                (object_->thing.ref_count)++;
+
 
                 const bool shmem_has_expired = now -
                     object_->last_access_time_in_seconds
@@ -79,6 +80,11 @@ namespace irods::experimental::interprocess
 
             }
 
+            ~named_shared_memory_object()
+            {
+                (object_->thing.ref_count)--;
+            }
+
             auto remove() -> void
             {
                 object_->thing.~T();
@@ -88,7 +94,7 @@ namespace irods::experimental::interprocess
             template <typename Function>
             auto atomic_exec(Function _func) const
             {
-                bi::scoped_lock lk{object_->mtx};
+                bi::scoped_lock lk{object_->access_mutex};
                 return _func(object_->thing);
             }
 

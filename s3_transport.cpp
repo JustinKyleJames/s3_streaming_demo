@@ -122,6 +122,152 @@ namespace irods::experimental::io::s3_transport
         usleep( us );
     } // end s3_sleep
 
+    namespace s3_head_object_callback
+    {
+        libs3_types::status on_response_properties (const libs3_types::response_properties *properties,
+                                                    void *callback_data)
+        {
+            return S3StatusOK;
+        }
+
+        void on_response_complete (libs3_types::status status,
+                                   const libs3_types::error_details *error,
+                                   void *callback_data)
+        {
+            data_for_head_callback *data = (data_for_head_callback*)callback_data;
+            store_and_log_status( status, error, __FUNCTION__, data->bucket_context,
+                    data->status, data->debug_flag );
+        }
+
+
+    }
+
+    namespace s3_upload
+    {
+
+        namespace initialization_callback
+        {
+
+            libs3_types::status on_response (const libs3_types::char_type* upload_id,
+                                          void *callback_data )
+            {
+                using named_shared_memory_object =
+                    irods::experimental::interprocess::shared_memory::named_shared_memory_object
+                    <shared_data::multipart_shared_data>;
+                // upload upload_id in shared memory
+                // no need to shared_memory_lock as this should already be locked
+
+                // upload upload_id in shared memory
+                upload_manager *manager = (upload_manager *)callback_data;
+
+                // upload upload_id in shared memory
+                // upload upload_id in shared memory
+                std::string& object_key = manager->object_key;
+                auto shared_memory_name =  object_key + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
+
+                // upload upload_id in shared memory
+                named_shared_memory_object shm_obj{shared_memory_name,
+                    constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS,
+                    constants::MAX_S3_SHMEM_SIZE};
+
+                // upload upload_id in shared memory - already locked here
+                shm_obj.exec([upload_id](auto& data) {
+                    data.upload_id = upload_id;
+                });
+
+                // upload upload_id in shared memory
+                return S3StatusOK;
+            } // end on_response
+
+            libs3_types::status on_response_properties (const libs3_types::response_properties *properties,
+                                                     void *callback_data)
+            {
+                return S3StatusOK;
+            } // end on_response_properties
+
+            void on_response_complete (libs3_types::status status,
+                                    const libs3_types::error_details *error,
+                                    void *callback_data)
+            {
+                upload_manager *data = (upload_manager*)callback_data;
+                store_and_log_status( status, error, __FUNCTION__, data->saved_bucket_context,
+                        data->status, data->debug_flag );
+            } // end on_response_complete
+
+        } // end namespace initialization_callback
+
+        // Uploading the multipart completion XML from our buffer
+        namespace commit_callback
+        {
+            int on_response (int buffer_size,
+                          libs3_types::buffer_type buffer,
+                          void *callback_data)
+            {
+                upload_manager *manager = (upload_manager *)callback_data;
+                long ret = 0;
+                if (manager->remaining) {
+                    int to_read_count = ((manager->remaining > buffer_size) ?
+                                  buffer_size : manager->remaining);
+                    memcpy(buffer, manager->xml.c_str() + manager->offset, to_read_count);
+                    ret = to_read_count;
+                }
+                manager->remaining -= ret;
+                manager->offset += ret;
+
+                return static_cast<int>(ret);
+            } // end commit
+
+            libs3_types::status on_response_properties (const libs3_types::response_properties *properties,
+                                          void *callback_data)
+            {
+                return S3StatusOK;
+            } // end response_properties
+
+            void on_response_completion (libs3_types::status status,
+                                      const libs3_types::error_details *error,
+                                      void *callback_data)
+            {
+                upload_manager *data = (upload_manager*)callback_data;
+                store_and_log_status( status, error, __FUNCTION__, data->saved_bucket_context,
+                        data->status, data->debug_flag );
+                // Don't change the global error, we may want to retry at a higher level.
+                // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
+            } // end response_completion
+
+
+        } // end namespace commit_callback
+
+
+        namespace cancel_callback
+        {
+            libs3_types::status g_response_completion_status = S3StatusOK;
+            libs3_types::bucket_context *g_response_completion_saved_bucket_context = nullptr;
+
+            libs3_types::status on_response_properties (const libs3_types::response_properties *properties,
+                                          void *callback_data)
+            {
+                return S3StatusOK;
+            } // response_properties
+
+            // S3_abort_multipart_upload() does not allow a callback_data parameter, so pass the
+            // final operation status using this global.
+
+            void on_response_completion (libs3_types::status status,
+                                      const libs3_types::error_details *error,
+                                      void *callback_data)
+            {
+                store_and_log_status( status, error, __FUNCTION__, *g_response_completion_saved_bucket_context,
+                        g_response_completion_status, false );
+                // Don't change the global error, we may want to retry at a higher level.
+                // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
+            } // end response_completion
+
+        } // end namespace cancel_callback
+
+
+
+    } // end namespace s3_multipart_upload
+
     namespace s3_multipart_upload
     {
 

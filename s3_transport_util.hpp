@@ -177,6 +177,24 @@ namespace irods::experimental::io::s3_transport
         time_t                                 shared_memory_timeout_in_seconds;
     };
 
+
+    struct data_for_head_callback
+    {
+        data_for_head_callback(libs3_types::bucket_context& _bucket_context, bool _debug_flag = false)
+            : last_modified{0}
+            , content_length{0}
+            , status{S3StatusOK}
+            , debug_flag{_debug_flag}
+            , bucket_context{_bucket_context}
+        {}
+
+        time_t                             last_modified;
+        uint64_t                           content_length;
+        libs3_types::status                status;
+        bool                               debug_flag;
+        libs3_types::bucket_context&       bucket_context;
+    };
+
 } // irods::experimental::io::s3_transport
 
 #endif // S3_TRANSPORT_UTIL_HPP

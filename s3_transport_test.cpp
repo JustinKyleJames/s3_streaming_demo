@@ -18,12 +18,12 @@ using s3_transport        = irods::experimental::io::s3_transport::s3_transport<
 using s3_transport_config = irods::experimental::io::s3_transport::config;
 
 void upload_part(int thread_number, const int thread_count, const uint32_t file_size,
-          const bool debug_flag, const char *hostname, const char *bucket_name,
-          const char *access_key, const char *secret_access_key, const char *filename);
+                 const bool debug_flag, const char *hostname, const char *bucket_name,
+                 const char *access_key, const char *secret_access_key, const char *filename);
 
 void download_part(int thread_number, const int thread_count, const uint32_t file_size,
-          const bool debug_flag, const char *hostname, const char *bucket_name,
-          const char *access_key, const char *secret_access_key, const char *filename);
+                   const bool debug_flag, const char *hostname, const char *bucket_name,
+                   const char *access_key, const char *secret_access_key, const char *filename);
 
 void open_file_with_read_write(int thread_number, const int thread_count, const uint32_t file_size,
                                const bool debug_flag, const char *hostname,
@@ -35,6 +35,8 @@ void usage()
     std::cerr << "Usage:  s3_transport_test <config_file> <upload_file> [upload|download|both|rw]"
               << std::endl;
 }
+
+bool use_multipart_flag = true;
 
 int main(int argc, char **argv)
 {
@@ -58,17 +60,6 @@ int main(int argc, char **argv)
             usage();
         }
     }
-
-    // Remove shared memory on construction and destruction
-    //struct shm_remove
-    //{
-    //   shm_remove() { bi::shared_memory_object::remove("MySharedMemory"); }
-    //   ~shm_remove(){ bi::shared_memory_object::remove("MySharedMemory"); }
-    //} remover;
-
-    //Create shared memory
-    //bi::managed_shared_memory segment(bi::create_only,"MySharedMemory", 65536);
-
 
     std::string config_file = argv[1];
     std::string filename = argv[2];
@@ -135,6 +126,14 @@ int main(int argc, char **argv)
     json_t *use_multiprocess_flag_json_object = json_object_get(root, "use_multiprocess_flag");
     bool use_multiprocess_flag = json_is_true(use_multiprocess_flag_json_object) ? true : false;
 
+    json_t *use_multipart_flag_json_object = json_object_get(root, "use_multipart_flag");
+    use_multipart_flag = json_is_true(use_multipart_flag_json_object) ? true : false;
+
+    if (!use_multipart_flag) {
+        use_multiprocess_flag = false;
+        thread_count = 1;
+    }
+
     // AWS
     std::string access_key;
     std::string secret_access_key;
@@ -156,16 +155,6 @@ int main(int argc, char **argv)
         std::cerr << "Key file does not have an secret_access_key." << std::endl;
         return 1;
     }
-
-    /*S3BucketContext bucket_context;
-    bucket_context.hostName = hostname.c_str();
-    bucket_context.bucketName = bucket_name.c_str();
-    bucket_context.protocol = S3ProtocolHTTP;
-    bucket_context.stsDate = S3STSAmzOnly;
-    bucket_context.uriStyle = S3UriStylePath;
-    bucket_context.accessKeyId = key_id.c_str();
-    bucket_context.secretAccessKey = access_key.c_str();
-    bucket_context.securityToken = nullptr;*/
 
     // determine file size
     uint32_t file_size;
@@ -210,6 +199,8 @@ int main(int argc, char **argv)
 
             std::thread *writer_threads = new std::thread[thread_count];
 
+printf("%s:%d (%s) =============== thread_count=%zu ==================\n", __FILE__, __LINE__, __FUNCTION__, thread_count);
+
             for (int thread_number = 0; thread_number <  thread_count; ++thread_number) {
 
                 printf("%s:%d (%s) start thread %d\n", __FILE__, __LINE__, __FUNCTION__,
@@ -240,11 +231,6 @@ int main(int argc, char **argv)
     printf("**************************************************************************\n");
 
     if (mode == "download" || mode == "both") {
-
-        //if (mode == "both") {
-        //    std::this_thread::sleep_for (std::chrono::seconds(4));
-        //}
-
 
         if (use_multiprocess_flag) {
 
@@ -300,6 +286,7 @@ int main(int argc, char **argv)
 
     if (mode == "rw") {
 
+
         std::thread *rw_threads = new std::thread[thread_count];
 
         for (int thread_number = 0; thread_number <  thread_count; ++thread_number) {
@@ -321,8 +308,8 @@ int main(int argc, char **argv)
             printf("%s:%d (%s) joined wr thread %d\n", __FILE__, __LINE__,
                     __FUNCTION__, thread_number);
         }
-
         delete[] rw_threads;
+
     }
 
     return 0;
@@ -352,14 +339,23 @@ void open_file_with_read_write(int thread_number,
     s3_config.secret_access_key = secret_access_key;
     s3_config.object_identifier = thread_number;
     s3_config.debug_flag = debug_flag;
+    s3_config.multipart_flag = use_multipart_flag;
 
     s3_transport tp1{s3_config};
     dstream ds1{tp1, filename};
+
+    if (ds1.fail()) {
+        printf("%s:%d (%s) DBG open failed! thread=%u\n",
+                __FILE__, __LINE__, __FUNCTION__, thread_number);
+        return;
+    }
+
 
     if (thread_number == 0) {
 
         // test offset write
         ds1.seekp(0, std::ios_base::end);
+        printf("Adding - adding this to end\n");
         std::string write_string = "adding this to end\n";
         ds1.write(write_string.c_str(), write_string.length());
 
@@ -385,7 +381,7 @@ void open_file_with_read_write(int thread_number,
     }
 
     // will be automatic
-    ds1.close();
+    //ds1.close();
     printf("CLOSE DONE FOR %d\n", thread_number);
 }
 
@@ -444,6 +440,7 @@ void upload_part(int thread_number,
     s3_config.secret_access_key = secret_access_key;
     s3_config.object_identifier = thread_number;
     s3_config.debug_flag = debug_flag;
+    s3_config.multipart_flag = use_multipart_flag;
 
     s3_transport tp1{s3_config};
     odstream ds1{tp1, filename};
@@ -535,6 +532,7 @@ void download_part(int thread_number,
     s3_config.secret_access_key = secret_access_key;
     s3_config.object_identifier = thread_number;
     s3_config.debug_flag = debug_flag;
+    s3_config.multipart_flag = use_multipart_flag;
 
     s3_transport tp1{s3_config};
 

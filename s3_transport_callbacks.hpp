@@ -191,6 +191,220 @@ namespace irods::experimental::io::s3_transport
 
     };
 
+    namespace s3_head_object_callback
+    {
+        libs3_types::status on_response_properties (const libs3_types::response_properties *properties,
+                                                    void *callback_data);
+
+        void on_response_complete (libs3_types::status status,
+                                       const libs3_types::error_details *error,
+                                       void *callback_data);
+    }
+
+    namespace s3_upload
+    {
+
+        template <typename buffer_type>
+        class callback_for_write_to_s3_base
+        {
+
+            public:
+
+                callback_for_write_to_s3_base(libs3_types::bucket_context& _saved_bucket_context,
+                                              upload_manager& _manager)
+                    : saved_bucket_context{_saved_bucket_context}
+                    , manager{_manager}
+                    , offset{0}
+                    , content_length{0}
+                    , enable_md5{false}
+                    , server_encrypt{false}
+                    , object_identifier{0}
+                    , debug_flag{false}
+                    , object_key{}
+                {}
+
+
+                virtual int callback_implementation(int libs3_buffer_size,
+                                                    libs3_types::char_type *libs3_buffer) = 0;
+
+                static int invoke_callback(int libs3_buffer_size,
+                                           libs3_types::char_type *libs3_buffer,
+                                           void *callback_data)
+                {
+                    callback_for_write_to_s3_base *data =
+                        (callback_for_write_to_s3_base*)callback_data;
+                    return data->callback_implementation(libs3_buffer_size, libs3_buffer);
+                }
+
+                static libs3_types::status on_response_properties(const libs3_types::response_properties *properties,
+                                                                  void *callback_data)
+                {
+                    return S3StatusOK;
+                }
+
+                static void on_response_completion (libs3_types::status status,
+                                                    const libs3_types::error_details *error,
+                                                    void *callback_data)
+                {
+                    callback_for_write_to_s3_base *data =
+                        (callback_for_write_to_s3_base*)callback_data;
+                    store_and_log_status( status, error, __FUNCTION__, data->saved_bucket_context,
+                            data->status, data->debug_flag);
+
+                }
+
+                virtual ~callback_for_write_to_s3_base() {};
+
+                //std::reference_wrapper<upload_manager> manager;
+                libs3_types::status          status;
+                bool                         enable_md5;
+                bool                         server_encrypt;
+                int                          object_identifier;
+                std::string                  object_key;
+
+                uint64_t                     offset;
+                uint64_t                     content_length;
+                libs3_types::bucket_context& saved_bucket_context; // To enable more detailed error messages
+                bool                         debug_flag;
+                upload_manager&              manager;
+                uint64_t                     bytes_written;
+
+        };
+
+        template <typename buffer_type>
+        class callback_for_write_from_cache_to_s3 : public callback_for_write_to_s3_base<buffer_type>
+        {
+
+            public:
+
+                callback_for_write_from_cache_to_s3(libs3_types::bucket_context& _saved_bucket_context,
+                                                    upload_manager& _manager)
+                    : callback_for_write_to_s3_base<buffer_type>{_saved_bucket_context, _manager}
+                {}
+
+                int callback_implementation(int libs3_buffer_size,
+                                            libs3_types::buffer_type libs3_buffer)
+                {
+
+                    if (!cache_fstream.is_open()) {
+                        cache_fstream.open(filename.c_str(), std::ios_base::in);
+                        if (cache_fstream.fail()) {
+                            return 0;
+                        }
+                    }
+
+                    // writing cache file to s3 buffer
+                    auto length_to_read_from_cache = this->content_length - this->bytes_written
+                        > libs3_buffer_size
+                        ? libs3_buffer_size
+                        : this->content_length - this->bytes_written;
+
+                    cache_fstream.seekg(this->offset);
+                    cache_fstream.read(libs3_buffer, length_to_read_from_cache);
+
+                    auto bytes_read_from_cache = static_cast<uint64_t>(cache_fstream.tellg()) - this->offset;
+                    if (bytes_read_from_cache > 0) {
+                        this->offset += bytes_read_from_cache;
+                        this->bytes_written += bytes_read_from_cache;
+                    }
+
+                    return bytes_read_from_cache;
+
+                }
+
+                ~callback_for_write_from_cache_to_s3() {
+                    if (cache_fstream.is_open()) {
+                        cache_fstream.close();
+                    }
+                };
+
+                void set_and_open_cache_file(std::string& f)
+                {
+                    filename = f;
+                    cache_fstream.open(filename.c_str(), std::ios_base::in);
+                }
+
+            private:
+
+                std::string   filename;
+                std::ifstream cache_fstream;
+
+        };
+
+        template <typename buffer_type>
+        class callback_for_write_from_buffer_to_s3 : public callback_for_write_to_s3_base<buffer_type>
+        {
+
+            public:
+
+                using circular_buffer_type = irods::experimental::circular_buffer<upload_page<buffer_type>>;
+                using output_char_type   = typename buffer_type::value_type;
+
+                callback_for_write_from_buffer_to_s3(libs3_types::bucket_context& _saved_bucket_context,
+                                                     upload_manager& _manager,
+                                                     circular_buffer_type& _circular_buffer)
+                    : callback_for_write_to_s3_base<buffer_type>{_saved_bucket_context, _manager}
+                    , circular_buffer{_circular_buffer}
+                {}
+
+                int callback_implementation(int libs3_buffer_size,
+                                            libs3_types::buffer_type libs3_buffer)
+                {
+
+                    // if we've already written the expected number of bytes, just return 0 which will
+                    // trigger the completion
+                    if (bytes_written >= this->content_length) {
+                        return 0;
+                    }
+
+                    // if we've exhausted our current buffer, read the next buffer from the circular_buffer
+                    while (this->offset >= buffer.size()) {
+
+                        upload_page<buffer_type> page;
+
+                        // read the first page
+                        if (this->debug_flag) {
+                            printf("%s:%d (%s) [[%d]] waiting to read\n", __FILE__, __LINE__, __FUNCTION__,
+                                    this->object_identifier);
+                        }
+                        circular_buffer.pop_front(page);
+                        if (this->debug_flag) {
+                            printf("%s:%d (%s) [[%d]] read page [buffer=%p][buffer_size=%lu][terminate_flag=%d]\n",
+                                    __FILE__, __LINE__, __FUNCTION__, this->object_identifier, page.buffer.data(),
+                                    page.buffer.size(), page.terminate_flag);
+                        }
+                        buffer = page.buffer;
+                        this->offset = 0;
+                    }
+
+                    auto remaining_transport_buffer_size = buffer.size() - this->offset;
+
+                    bool libs3_buffer_larger_than_remaining_transport_buffer = libs3_buffer_size
+                        > remaining_transport_buffer_size;
+
+                    auto length = libs3_buffer_larger_than_remaining_transport_buffer
+                        ? remaining_transport_buffer_size
+                        : libs3_buffer_size;
+
+                    memcpy(libs3_buffer, buffer.data() + this->offset, length);
+
+                    this->offset += length;
+                    bytes_written += length;
+
+                    return length;
+
+                }
+
+                ~callback_for_write_from_buffer_to_s3() {};
+
+                buffer_type buffer;
+                irods::experimental::circular_buffer<upload_page<buffer_type>>& circular_buffer;
+                uint64_t bytes_written;
+
+        };
+
+    } // end namespace s3_upload
+
     namespace s3_multipart_upload
     {
 
@@ -198,14 +412,14 @@ namespace irods::experimental::io::s3_transport
         {
 
             libs3_types::status on_response (const libs3_types::char_type* upload_id,
-                                          void *callback_data );
+                                             void *callback_data );
 
             libs3_types::status on_response_properties (const libs3_types::response_properties *properties,
-                                                     void *callback_data);
+                                                        void *callback_data);
 
             void on_response_complete (libs3_types::status status,
-                                    const libs3_types::error_details *error,
-                                    void *callback_data);
+                                       const libs3_types::error_details *error,
+                                       void *callback_data);
         } // end namespace initialization_callback
 
 
@@ -217,7 +431,7 @@ namespace irods::experimental::io::s3_transport
                           void *callback_data);
 
             libs3_types::status on_response_properties (const libs3_types::response_properties *properties,
-                                                     void *callback_data);
+                                                        void *callback_data);
 
             void on_response_completion (libs3_types::status status,
                                          const libs3_types::error_details *error,
@@ -357,6 +571,9 @@ namespace irods::experimental::io::s3_transport
 
                     if (!cache_fstream.is_open()) {
                         cache_fstream.open(filename.c_str(), std::ios_base::in);
+                        if (cache_fstream.fail()) {
+                            return 0;
+                        }
                     }
 
                     // writing cache file to s3 buffer
@@ -364,7 +581,6 @@ namespace irods::experimental::io::s3_transport
                         > libs3_buffer_size
                         ? libs3_buffer_size
                         : this->content_length - this->bytes_written;
-//printf("%s:%d (%s) [[%d]] [part=%d] [offset==%lu][content_length=%lu][length_to_read=%lu]\n", __FILE__, __LINE__, __FUNCTION__, this->object_identifier, this->sequence, this->offset, this->content_length, length_to_read_from_cache);
 
                     cache_fstream.seekg(this->offset);
                     cache_fstream.read(libs3_buffer, length_to_read_from_cache);
@@ -375,7 +591,6 @@ namespace irods::experimental::io::s3_transport
                         this->bytes_written += bytes_read_from_cache;
                     }
 
-//printf("%s:%d (%s) [[%d]] [part=%d] [bytes_read=%lu][new offset=%lu]\n", __FILE__, __LINE__, __FUNCTION__, this->object_identifier, this->sequence, bytes_read_from_cache, this->offset);
 
                     return bytes_read_from_cache;
 
@@ -433,13 +648,15 @@ namespace irods::experimental::io::s3_transport
 
                         // read the first page
                         if (this->debug_flag) {
-                            printf("%s:%d (%s) [[%d]] waiting to read\n", __FILE__, __LINE__, __FUNCTION__,
+                            printf("%s:%d (%s) [[%d]] waiting to read\n",
+                                    __FILE__, __LINE__, __FUNCTION__,
                                     this->object_identifier);
                         }
                         circular_buffer.pop_front(page);
                         if (this->debug_flag) {
-                            printf("%s:%d (%s) [[%d]] read page [buffer=%p][buffer_size=%lu][terminate_flag=%d]\n",
-                                    __FILE__, __LINE__, __FUNCTION__, this->object_identifier, page.buffer.data(),
+                            printf("%s:%d (%s) [[%d]] read page [buffer=%p][buffer_size=%lu]"
+                                    "[terminate_flag=%d]\n", __FILE__, __LINE__, __FUNCTION__,
+                                    this->object_identifier, page.buffer.data(),
                                     page.buffer.size(), page.terminate_flag);
                         }
                         buffer = page.buffer;
@@ -460,7 +677,6 @@ namespace irods::experimental::io::s3_transport
                     this->offset += length;
                     bytes_written += length;
 
-//printf("%s:%d (%s) [[%d]] [part=%d] [bytes_read=%lu][new offset=%lu]\n", __FILE__, __LINE__, __FUNCTION__, this->object_identifier, this->sequence, length, this->offset);
                     return length;
 
                 }

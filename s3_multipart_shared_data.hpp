@@ -35,6 +35,7 @@ namespace irods::experimental::io::s3_transport::shared_data
     // data that needs to be shared among different processes
     struct multipart_shared_data
     {
+        using interprocess_recursive_mutex = boost::interprocess::interprocess_recursive_mutex;
 
         multipart_shared_data(const interprocess_types::void_allocator &allocator)
             : file_open_counter{0}
@@ -43,6 +44,7 @@ namespace irods::experimental::io::s3_transport::shared_data
             , last_irods_error_code{0}
             , cache_file_download_started_flag{false}
             , cache_file_download_completed_flag{false}
+            , ref_count{0}
         {}
 
         void reset_fields()
@@ -61,9 +63,9 @@ namespace irods::experimental::io::s3_transport::shared_data
         int                                   last_irods_error_code;
         bool                                  cache_file_download_started_flag;
         bool                                  cache_file_download_completed_flag;
+        int                                   ref_count;
 
-        // TODO add using above for this
-        boost::interprocess::interprocess_recursive_mutex file_open_mutex;
+        interprocess_recursive_mutex file_open_close_mutex;
 
     };
 

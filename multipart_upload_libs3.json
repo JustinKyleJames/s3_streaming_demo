@@ -5,5 +5,6 @@
     "thread_count": 4,
     "debug_flag": true,
     "circular_buffer_capacity": 10,
-    "use_multiprocess_flag": false 
+    "use_multiprocess_flag": false,
+    "use_multipart_flag": false
 }
