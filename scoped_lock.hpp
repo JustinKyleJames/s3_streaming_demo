@@ -15,13 +15,13 @@ namespace irods::experimental::io
                     const std::string& _file = "",
                     int _line = 0,
                     const std::string& _function = "",
-                    int _object_identifier = 0)
+                    int _thread_identifier = 0)
             : file{_file}
             , line{_line}
             , function{_function}
             , named_mutex_ptr{nullptr}
             , lock_ptr{nullptr}
-            , object_identifier{_object_identifier}
+            , thread_identifier{_thread_identifier}
         {
             namespace bi = boost::interprocess;
 
@@ -30,7 +30,7 @@ namespace irods::experimental::io
             //if (file != nullptr && function != nullptr) {
             if (file != "" && function != "") {
                 printf("%s:%d (%s) [[%d]] ---LOCK--- waiting for lock\n",
-                        file.c_str(), line, function.c_str(), object_identifier);
+                        file.c_str(), line, function.c_str(), thread_identifier);
             }
 
             //named_mutex_ptr = new bi::named_mutex(bi::open_or_create, mutex_name.c_str());
@@ -43,7 +43,7 @@ namespace irods::experimental::io
             //if (file != nullptr && function != nullptr) {
             if (file != "" && function != "") {
                 printf("%s:%d (%s) [[%d]] ---LOCK--- acquired lock\n",
-                        file.c_str(), line, function.c_str(), object_identifier);
+                        file.c_str(), line, function.c_str(), thread_identifier);
             }
         }
 
@@ -52,7 +52,7 @@ namespace irods::experimental::io
             //if (file != nullptr && function != nullptr) {
             if (file != "" && function != "") {
                 printf("%s:%d (%s) [[%d]] ---LOCK--- releasing lock\n",
-                        file.c_str(), line, function.c_str(), object_identifier);
+                        file.c_str(), line, function.c_str(), thread_identifier);
             }
 
         }
@@ -83,7 +83,7 @@ namespace irods::experimental::io
         const std::string file;
         int line;
         const std::string function;
-        int object_identifier;
+        int thread_identifier;
     };
 } // end namespace irods::experimental::io
 

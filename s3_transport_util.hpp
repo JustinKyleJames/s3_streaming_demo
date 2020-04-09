@@ -144,7 +144,7 @@ namespace irods::experimental::io::s3_transport
         libs3_types::bucket_context&
                             saved_bucket_context;   // To enable more detailed error messages
         bool                debug_flag;
-        int                 object_identifier;
+        int                 thread_identifier;
     };
 
     template <typename buffer_type>
@@ -160,7 +160,7 @@ namespace irods::experimental::io::s3_transport
             , enable_md5{false}
             , server_encrypt{false}
             , debug_flag{false}
-            , object_identifier{0}
+            , thread_identifier{0}
             , shared_memory_timeout_in_seconds{constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS}
         {}
 
@@ -173,7 +173,7 @@ namespace irods::experimental::io::s3_transport
         bool                                   enable_md5;
         bool                                   server_encrypt;
         bool                                   debug_flag;
-        int                                    object_identifier;
+        int                                    thread_identifier;
         time_t                                 shared_memory_timeout_in_seconds;
     };
 

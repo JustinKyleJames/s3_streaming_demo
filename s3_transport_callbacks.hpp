@@ -218,7 +218,7 @@ namespace irods::experimental::io::s3_transport
                     , content_length{0}
                     , enable_md5{false}
                     , server_encrypt{false}
-                    , object_identifier{0}
+                    , thread_identifier{0}
                     , debug_flag{false}
                     , object_key{}
                 {}
@@ -259,7 +259,7 @@ namespace irods::experimental::io::s3_transport
                 libs3_types::status          status;
                 bool                         enable_md5;
                 bool                         server_encrypt;
-                int                          object_identifier;
+                int                          thread_identifier;
                 std::string                  object_key;
 
                 uint64_t                     offset;
@@ -365,12 +365,12 @@ namespace irods::experimental::io::s3_transport
                         // read the first page
                         if (this->debug_flag) {
                             printf("%s:%d (%s) [[%d]] waiting to read\n", __FILE__, __LINE__, __FUNCTION__,
-                                    this->object_identifier);
+                                    this->thread_identifier);
                         }
                         circular_buffer.pop_front(page);
                         if (this->debug_flag) {
                             printf("%s:%d (%s) [[%d]] read page [buffer=%p][buffer_size=%lu][terminate_flag=%d]\n",
-                                    __FILE__, __LINE__, __FUNCTION__, this->object_identifier, page.buffer.data(),
+                                    __FILE__, __LINE__, __FUNCTION__, this->thread_identifier, page.buffer.data(),
                                     page.buffer.size(), page.terminate_flag);
                         }
                         buffer = page.buffer;
@@ -455,7 +455,7 @@ namespace irods::experimental::io::s3_transport
                     , content_length{0}
                     , enable_md5{false}
                     , server_encrypt{false}
-                    , object_identifier{0}
+                    , thread_identifier{0}
                     , debug_flag{false}
                     , object_key{}
                 {}
@@ -538,7 +538,7 @@ namespace irods::experimental::io::s3_transport
                 libs3_types::status          status;
                 bool                         enable_md5;
                 bool                         server_encrypt;
-                int                          object_identifier;
+                int                          thread_identifier;
                 time_t                       shared_memory_timeout_in_seconds;
                 std::string                  object_key;
 
@@ -650,13 +650,13 @@ namespace irods::experimental::io::s3_transport
                         if (this->debug_flag) {
                             printf("%s:%d (%s) [[%d]] waiting to read\n",
                                     __FILE__, __LINE__, __FUNCTION__,
-                                    this->object_identifier);
+                                    this->thread_identifier);
                         }
                         circular_buffer.pop_front(page);
                         if (this->debug_flag) {
                             printf("%s:%d (%s) [[%d]] read page [buffer=%p][buffer_size=%lu]"
                                     "[terminate_flag=%d]\n", __FILE__, __LINE__, __FUNCTION__,
-                                    this->object_identifier, page.buffer.data(),
+                                    this->thread_identifier, page.buffer.data(),
                                     page.buffer.size(), page.terminate_flag);
                         }
                         buffer = page.buffer;

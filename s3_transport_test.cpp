@@ -337,7 +337,7 @@ void open_file_with_read_write(int thread_number,
     s3_config.bucket_name = bucket_name;
     s3_config.access_key = access_key;
     s3_config.secret_access_key = secret_access_key;
-    s3_config.object_identifier = thread_number;
+    s3_config.thread_identifier = thread_number;
     s3_config.debug_flag = debug_flag;
     s3_config.multipart_flag = use_multipart_flag;
 
@@ -438,7 +438,7 @@ void upload_part(int thread_number,
     s3_config.bucket_name = bucket_name;
     s3_config.access_key = access_key;
     s3_config.secret_access_key = secret_access_key;
-    s3_config.object_identifier = thread_number;
+    s3_config.thread_identifier = thread_number;
     s3_config.debug_flag = debug_flag;
     s3_config.multipart_flag = use_multipart_flag;
 
@@ -530,7 +530,7 @@ void download_part(int thread_number,
     s3_config.bucket_name = bucket_name;
     s3_config.access_key = access_key;
     s3_config.secret_access_key = secret_access_key;
-    s3_config.object_identifier = thread_number;
+    s3_config.thread_identifier = thread_number;
     s3_config.debug_flag = debug_flag;
     s3_config.multipart_flag = use_multipart_flag;
 
