@@ -32,11 +32,12 @@ void open_file_with_read_write(int thread_number, const int thread_count, const 
 
 void usage()
 {
-    std::cerr << "Usage:  s3_transport_test <config_file> <upload_file> [upload|download|both|rw]"
+    std::cerr << "Usage:  s3_transport_test <config_file> <upload_file> ['upload'|'download'|'both'|'rw'] [s3_prefix]"
               << std::endl;
 }
 
 bool use_multipart_flag = true;
+std::string s3_prefix = "";
 
 int main(int argc, char **argv)
 {
@@ -44,8 +45,6 @@ int main(int argc, char **argv)
     setbuf(stdout, nullptr);
 
     namespace bi = boost::interprocess;
-
-    std::cout << argc << std::endl;
 
     if (argc < 3 || argc > 5) {
         usage();
@@ -59,6 +58,10 @@ int main(int argc, char **argv)
             std::cerr << "mode must be upload|download|both|rw" << std::endl;
             usage();
         }
+    }
+
+    if (argc >= 5) {
+        s3_prefix = argv[4];
     }
 
     std::string config_file = argv[1];
@@ -342,7 +345,7 @@ void open_file_with_read_write(int thread_number,
     s3_config.multipart_flag = use_multipart_flag;
 
     s3_transport tp1{s3_config};
-    dstream ds1{tp1, filename};
+    dstream ds1{tp1, s3_prefix + filename};
 
     if (ds1.fail()) {
         printf("%s:%d (%s) DBG open failed! thread=%u\n",
@@ -443,12 +446,13 @@ void upload_part(int thread_number,
     s3_config.multipart_flag = use_multipart_flag;
 
     s3_transport tp1{s3_config};
-    odstream ds1{tp1, filename};
+    odstream ds1{tp1, s3_prefix + filename};
     ds1.seekp(start);
 
     // doing two writes here just to test that that works
-    ds1.write(current_buffer, 100);
-    ds1.write(current_buffer+100, current_buffer_size-100);
+    ds1.write(current_buffer, current_buffer_size);
+    //ds1.write(current_buffer, 100);
+    //ds1.write(current_buffer+100, current_buffer_size-100);
 
     printf("WRITE DONE FOR %d\n", thread_number);
 
@@ -536,7 +540,7 @@ void download_part(int thread_number,
 
     s3_transport tp1{s3_config};
 
-    idstream ds1{tp1, filename};
+    idstream ds1{tp1, s3_prefix + filename};
     ds1.seekg(start);
     ds1.read(current_buffer, current_buffer_size);
 

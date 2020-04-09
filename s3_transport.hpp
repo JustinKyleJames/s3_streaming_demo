@@ -43,7 +43,7 @@
 #include <boost/filesystem.hpp>
 
 // local includes
-#include "managed_shared_memory_object.hpp"
+#include "hashed_managed_shared_memory_object.hpp"
 #include "s3_multipart_shared_data.hpp"
 #include "s3_transport_types.hpp"
 #include "s3_transport_util.hpp"
@@ -115,8 +115,8 @@ namespace irods::experimental::io::s3_transport
 
     private:
 
-        using named_shared_memory_object =
-            irods::experimental::interprocess::shared_memory::named_shared_memory_object
+        using hashed_named_shared_memory_object =
+            irods::experimental::interprocess::shared_memory::hashed_named_shared_memory_object
             <shared_data::multipart_shared_data>;
 
         // clang-format off
@@ -287,7 +287,7 @@ namespace irods::experimental::io::s3_transport
 
             auto shared_memory_name =  object_key_ + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
 
-            named_shared_memory_object shm_obj{shared_memory_name,
+            hashed_named_shared_memory_object shm_obj{shared_memory_name,
                 constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS,
                 constants::MAX_S3_SHMEM_SIZE};
 
@@ -401,6 +401,7 @@ namespace irods::experimental::io::s3_transport
         std::streamsize send(const char_type* _buffer,
                              std::streamsize _buffer_size) override
         {
+printf("%s:%d (%s) [[%d]] send(buffer, %ld)\n", __FILE__, __LINE__, __FUNCTION__, thread_identifier_, _buffer_size);
 
             if (use_cache_) {
                 auto position_before_write = cache_fstream_.tellp();
@@ -453,6 +454,7 @@ namespace irods::experimental::io::s3_transport
         pos_type seekpos(off_type _offset,
                          std::ios_base::seekdir _dir) override
         {
+printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
             if (!is_open()) {
                 return seek_error;
             }
@@ -532,7 +534,7 @@ namespace irods::experimental::io::s3_transport
             return cache_file_size;
         }
 
-        bool begin_multipart_upload(named_shared_memory_object& shm_obj, const int& file_open_counter)
+        bool begin_multipart_upload(hashed_named_shared_memory_object& shm_obj, const int& file_open_counter)
         {
             auto last_irods_error_code = shm_obj.atomic_exec([](auto& data) {
                 return data.last_irods_error_code;
@@ -569,13 +571,15 @@ namespace irods::experimental::io::s3_transport
             return true;
         }
 
-        void download_object_to_cache(named_shared_memory_object& shm_obj)
+        void download_object_to_cache(hashed_named_shared_memory_object& shm_obj)
         {
 
             namespace bf = boost::filesystem;
 
-            // TODO not sure how boost::filesystem will handle this if object_key_ has a directory structure in it. test.
             bf::path cache_file =  bf::path(config_.cache_directory) / bf::path(object_key_ + "-cache");
+            bf::path parent_path = cache_file.parent_path();
+            boost::filesystem::create_directory(parent_path);
+printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__, __FUNCTION__, thread_identifier_, cache_file.string().c_str(), parent_path.string().c_str());
             cache_file_path_ = cache_file.string();
 
             bool cache_file_download_started_flag = shm_obj.atomic_exec([](auto& data) {
@@ -633,7 +637,7 @@ namespace irods::experimental::io::s3_transport
             }
         }
 
-        int flush_cache_file(named_shared_memory_object& shm_obj) {
+        int flush_cache_file(hashed_named_shared_memory_object& shm_obj) {
 
 
             if (config_.debug_flag) {
@@ -652,7 +656,7 @@ namespace irods::experimental::io::s3_transport
             // calculate the part size
             std::ifstream ifs;
             ifs.open(cache_file_path_.c_str(), std::ios::out);
-            if (ifs.fail()) {
+            if (!ifs) {
                 fprintf(stderr, "%s:%d (%s) [[%d]] Failed to open cache file.\n",
                         __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
                 return S3_PUT_ERROR;
@@ -804,9 +808,10 @@ namespace irods::experimental::io::s3_transport
             }
 
             if (config_.debug_flag) {
-                printf("%s:%d (%s) [[%d]] [config_.multipart_flag = %d][use_cache_ = %d]"
+                printf("%s:%d (%s) [[%d]] [object_key_ = %s][config_.multipart_flag = %d][use_cache_ = %d]"
                     "[download_to_cache_ = %d][O_WRONLY = %d][O_RDONLY = %d]\n",
                     __FILE__, __LINE__, __FUNCTION__, thread_identifier_,
+                    object_key_.c_str(),
                     config_.multipart_flag,
                     use_cache_,
                     download_to_cache_,
@@ -823,7 +828,7 @@ namespace irods::experimental::io::s3_transport
 
             auto shared_memory_name =  object_key_ + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
 
-            named_shared_memory_object shm_obj{shared_memory_name,
+            hashed_named_shared_memory_object shm_obj{shared_memory_name,
                 constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS,
                 constants::MAX_S3_SHMEM_SIZE};
 
@@ -898,7 +903,7 @@ namespace irods::experimental::io::s3_transport
                     cache_file_path_ = cache_file.string();
                     cache_fstream_.open(cache_file_path_.c_str(), _mode);
 
-                    if (cache_fstream_.fail()) {
+                    if (!cache_fstream_) {
                         fprintf(stderr, "Failed to open cache file.\n");
                         critical_error_encountered_ = true;
                         return false;
@@ -976,7 +981,7 @@ namespace irods::experimental::io::s3_transport
             // read shared memory entry for this key
             auto shared_memory_name =  object_key_ + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
 
-            named_shared_memory_object shm_obj{shared_memory_name,
+            hashed_named_shared_memory_object shm_obj{shared_memory_name,
                 config_.shared_memory_timeout_in_seconds,
                 constants::MAX_S3_SHMEM_SIZE};
 
@@ -999,6 +1004,11 @@ namespace irods::experimental::io::s3_transport
                     }
                     S3_initiate_multipart(&bucket_context_, object_key_.c_str(),
                             &put_props_, &mpu_initial_handler, nullptr, &upload_manager_);
+
+                    if (config_.debug_flag) {
+                        printf("%s:%d (%s) [[%d]] [manager.status=%s]\n", __FILE__, __LINE__,
+                                __FUNCTION__, thread_identifier_, S3_get_status_name(upload_manager_.status));
+                    }
 
                     if (upload_manager_.status != S3StatusOK) {
                         s3_sleep( config_.retry_wait_seconds, 0 );
@@ -1033,7 +1043,7 @@ namespace irods::experimental::io::s3_transport
             // read shared memory entry for this key
             auto shared_memory_name =  object_key_ + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
 
-            named_shared_memory_object shm_obj{shared_memory_name,
+            hashed_named_shared_memory_object shm_obj{shared_memory_name,
                 config_.shared_memory_timeout_in_seconds,
                 constants::MAX_S3_SHMEM_SIZE};
 
@@ -1081,7 +1091,7 @@ namespace irods::experimental::io::s3_transport
 
             auto shared_memory_name =  object_key_ + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
 
-            named_shared_memory_object shm_obj{shared_memory_name,
+            hashed_named_shared_memory_object shm_obj{shared_memory_name,
                 config_.shared_memory_timeout_in_seconds,
                 constants::MAX_S3_SHMEM_SIZE};
 
@@ -1226,6 +1236,7 @@ namespace irods::experimental::io::s3_transport
                     read_callback->offset = 0;
                 }
                 read_callback->debug_flag = config_.debug_flag;
+                read_callback->thread_identifier = thread_identifier_;
 
                 if (config_.debug_flag) {
                     msg.str( std::string() ); // Clear
@@ -1272,7 +1283,7 @@ namespace irods::experimental::io::s3_transport
                 // update the last error in shmem
 
                 auto shared_memory_name =  object_key_ + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
-                named_shared_memory_object shm_obj{shared_memory_name,
+                hashed_named_shared_memory_object shm_obj{shared_memory_name,
                     config_.shared_memory_timeout_in_seconds,
                     constants::MAX_S3_SHMEM_SIZE};
 
@@ -1295,7 +1306,7 @@ namespace irods::experimental::io::s3_transport
             // read upload_id from shmem
             auto shared_memory_name =  object_key_ + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
 
-            named_shared_memory_object shm_obj{shared_memory_name,
+            hashed_named_shared_memory_object shm_obj{shared_memory_name,
                 constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS,
                 constants::MAX_S3_SHMEM_SIZE};
 
@@ -1345,6 +1356,7 @@ namespace irods::experimental::io::s3_transport
                     write_callback->sequence = part_number + 1;
                     write_callback->content_length = content_length;
                     write_callback->offset = offset;
+                    write_callback->thread_identifier = thread_identifier_;
 
                 } else {
 

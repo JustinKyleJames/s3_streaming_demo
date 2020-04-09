@@ -40,7 +40,7 @@
 #include <boost/filesystem.hpp>
 
 // local includes
-#include "managed_shared_memory_object.hpp"
+#include "hashed_managed_shared_memory_object.hpp"
 #include "s3_multipart_shared_data.hpp"
 
 #include "s3_transport_types.hpp"

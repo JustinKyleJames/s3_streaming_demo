@@ -32,10 +32,9 @@
 #include <boost/filesystem.hpp>
 
 // local includes
-#include "managed_shared_memory_object.hpp"
+#include "hashed_managed_shared_memory_object.hpp"
 #include "s3_multipart_shared_data.hpp"
 #include "s3_transport_types.hpp"
-//#include "s3_transport_util.hpp"
 
 namespace irods::experimental::io::s3_transport
 {
@@ -51,6 +50,7 @@ namespace irods::experimental::io::s3_transport
                 : saved_bucket_context{_saved_bucket_context}
                 , offset{0}
                 , content_length{0}
+                , thread_identifier{0}
             {}
 
             virtual libs3_types::status callback_implementation(int libs3_buffer_size,
@@ -90,6 +90,7 @@ namespace irods::experimental::io::s3_transport
             libs3_types::status          status;
             libs3_types::bucket_context& saved_bucket_context; /* To enable more detailed error messages */
             bool                         debug_flag;
+            int                          thread_identifier;
     };
 
     template <typename buffer_type>
@@ -108,6 +109,12 @@ namespace irods::experimental::io::s3_transport
 
                 if (!cache_fstream.is_open()) {
                     cache_fstream.open(filename.c_str(), std::ios_base::out);
+                }
+
+                if (!cache_fstream) {
+                    fprintf(stderr, "%s:%d (%s) [[%d]] could not open cache file\n",
+                            __FILE__, __LINE__, __FUNCTION__, this->thread_identifier);
+                    return S3StatusAbortedByCallback;
                 }
 
                 // writing output to cache file
@@ -132,6 +139,10 @@ namespace irods::experimental::io::s3_transport
             {
                 filename = f;
                 cache_fstream.open(filename.c_str(), std::ios_base::out);
+                if (!cache_fstream) {
+                    fprintf(stderr, "%s:%d (%s) [[%d]] could not open cache file\n",
+                            __FILE__, __LINE__, __FUNCTION__, this->thread_identifier);
+                }
             }
 
         private:
@@ -288,9 +299,12 @@ namespace irods::experimental::io::s3_transport
 
                     if (!cache_fstream.is_open()) {
                         cache_fstream.open(filename.c_str(), std::ios_base::in);
-                        if (cache_fstream.fail()) {
-                            return 0;
-                        }
+                    }
+
+                    if (!cache_fstream) {
+                        fprintf(stderr, "%s:%d (%s) [[%d]] could not open cache file\n",
+                                __FILE__, __LINE__, __FUNCTION__, this->thread_identifier);
+                        return S3StatusAbortedByCallback;
                     }
 
                     // writing cache file to s3 buffer
@@ -322,6 +336,10 @@ namespace irods::experimental::io::s3_transport
                 {
                     filename = f;
                     cache_fstream.open(filename.c_str(), std::ios_base::in);
+                    if (!cache_fstream) {
+                        fprintf(stderr, "%s:%d (%s) [[%d]] could not open cache file\n",
+                                __FILE__, __LINE__, __FUNCTION__, this->thread_identifier);
+                    }
                 }
 
             private:
@@ -482,15 +500,15 @@ namespace irods::experimental::io::s3_transport
                     callback_for_write_to_s3_base *callback_for_write_to_s3_base_data
                         = static_cast<callback_for_write_to_s3_base*>(callback_data);
 
-                    using named_shared_memory_object =
-                        irods::experimental::interprocess::shared_memory::named_shared_memory_object
+                    using hashed_named_shared_memory_object =
+                        irods::experimental::interprocess::shared_memory::hashed_named_shared_memory_object
                         <shared_data::multipart_shared_data>;
 
                     const auto& object_key = callback_for_write_to_s3_base_data->object_key;
 
                     auto shared_memory_name =  object_key + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
 
-                    named_shared_memory_object shm_obj{shared_memory_name,
+                    hashed_named_shared_memory_object shm_obj{shared_memory_name,
                         constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS,
                         constants::MAX_S3_SHMEM_SIZE};
 
@@ -571,9 +589,12 @@ namespace irods::experimental::io::s3_transport
 
                     if (!cache_fstream.is_open()) {
                         cache_fstream.open(filename.c_str(), std::ios_base::in);
-                        if (cache_fstream.fail()) {
-                            return 0;
-                        }
+                    }
+
+                    if (!cache_fstream) {
+                        fprintf(stderr, "%s:%d (%s) [[%d]] could not open cache file\n",
+                                __FILE__, __LINE__, __FUNCTION__, this->thread_identifier);
+                        return 0;
                     }
 
                     // writing cache file to s3 buffer
@@ -606,6 +627,10 @@ namespace irods::experimental::io::s3_transport
                 {
                     filename = f;
                     cache_fstream.open(filename.c_str(), std::ios_base::in);
+                    if (!cache_fstream) {
+                        fprintf(stderr, "%s:%d (%s) [[%d]] could not open cache file\n",
+                                __FILE__, __LINE__, __FUNCTION__, this->thread_identifier);
+                    }
                 }
 
             private:
