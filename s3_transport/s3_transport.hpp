@@ -9,6 +9,7 @@
 #include <fileLseek.h>
 #include <rs_get_file_descriptor_info.hpp>
 #include <thread_pool.hpp>
+#include <utility>
 
 // misc includes
 #include "json.hpp"
@@ -18,14 +19,14 @@
 #include <string>
 #include <thread>
 #include <vector>
-#include <stdio.h>
 #include <cstdio>
 #include <iostream>
 #include <mutex>
 #include <condition_variable>
 #include <new>
-#include <time.h>
+#include <ctime>
 #include <chrono>
+#include <utility>
 
 // boost includes
 #include <boost/algorithm/string/predicate.hpp>
@@ -43,7 +44,6 @@
 #include <boost/filesystem.hpp>
 
 // local includes
-#include "hashed_managed_shared_memory_object.hpp"
 #include "s3_multipart_shared_data.hpp"
 #include "s3_transport_types.hpp"
 #include "s3_transport_util.hpp"
@@ -115,8 +115,8 @@ namespace irods::experimental::io::s3_transport
 
     private:
 
-        using hashed_named_shared_memory_object =
-            irods::experimental::interprocess::shared_memory::hashed_named_shared_memory_object
+        using named_shared_memory_object =
+            irods::experimental::interprocess::shared_memory::named_shared_memory_object
             <shared_data::multipart_shared_data>;
 
         // clang-format off
@@ -186,11 +186,27 @@ namespace irods::experimental::io::s3_transport
 
         }
 
-        ~s3_transport() {
+        ~s3_transport()
+        {
 
             if (begin_part_upload_thread_ptr_) {
                 begin_part_upload_thread_ptr_ -> join();
                 begin_part_upload_thread_ptr_ = nullptr;
+            }
+
+            // if using cache, go ahead and close the fstream
+            if (use_cache_) {
+                if (cache_fstream_.is_open()) {
+                    cache_fstream_.close();
+                }
+            }
+
+            // each process must initialize and deinitiatize.
+            {
+                std::lock_guard<std::mutex> lock(s3_initialized_counter_mutex_);
+                if (--s3_initialized_counter_ == 0) {
+                    S3_deinitialize();
+                }
             }
 
             if (put_props_.md5) free( (char*)put_props_.md5 );
@@ -198,6 +214,7 @@ namespace irods::experimental::io::s3_transport
 
         bool object_exists_in_s3() {
 
+            // TODO get this working, remove
             return true;
 
             data_for_head_callback data(bucket_context_, config_.debug_flag);
@@ -285,9 +302,7 @@ namespace irods::experimental::io::s3_transport
                 }
             }
 
-            auto shared_memory_name =  object_key_ + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
-
-            hashed_named_shared_memory_object shm_obj{shared_memory_name,
+            named_shared_memory_object shm_obj{shmem_key_,
                 constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS,
                 constants::MAX_S3_SHMEM_SIZE};
 
@@ -323,9 +338,14 @@ namespace irods::experimental::io::s3_transport
                 }
 
                 // if a critical error occurred - do not flush cache file or complete multipart upload
-                if (!critical_error_encountered_) {
 
-                    if (last_file_to_close && use_cache_) {
+                if (critical_error_encountered_) {
+
+                    return_value = false;
+
+                } else if (last_file_to_close) {
+
+                    if (use_cache_) {
 
                         if (0 != flush_cache_file(shm_obj)) {
                             fprintf(stderr, "%s:%d (%s) [[%d]] flush_cache_file returned error",
@@ -333,7 +353,7 @@ namespace irods::experimental::io::s3_transport
                             return_value = false;
                         }
 
-                    } else if (last_file_to_close) {
+                    } else {
 
                         return_value = shm_obj.atomic_exec( [this, &shm_obj, open_flags](auto& data) {
 
@@ -346,27 +366,10 @@ namespace irods::experimental::io::s3_transport
                             return true;
 
                         });
-
                     }
-                } else {
-                    return_value = false;
+
                 }
 
-
-                // if using cache, go ahead and close the fstream
-                if (use_cache_) {
-                    if (cache_fstream_.is_open()) {
-                        cache_fstream_.close();
-                    }
-                }
-
-                // each process must initialize and deinitiatize.
-                {
-                    std::lock_guard<std::mutex> lock(s3_initialized_counter_mutex_);
-                    if (--s3_initialized_counter_ == 0) {
-                        S3_deinitialize();
-                    }
-                }
 
             }
 
@@ -394,6 +397,7 @@ namespace irods::experimental::io::s3_transport
 
             // Not using cache.
             // just get what is asked for
+            // TODO did we return _buffer_size bytes?
             s3_download_part_worker_routine(_buffer, _buffer_size);
             return _buffer_size;
         }
@@ -401,7 +405,6 @@ namespace irods::experimental::io::s3_transport
         std::streamsize send(const char_type* _buffer,
                              std::streamsize _buffer_size) override
         {
-printf("%s:%d (%s) [[%d]] send(buffer, %ld)\n", __FILE__, __LINE__, __FUNCTION__, thread_identifier_, _buffer_size);
 
             if (use_cache_) {
                 auto position_before_write = cache_fstream_.tellp();
@@ -454,7 +457,6 @@ printf("%s:%d (%s) [[%d]] send(buffer, %ld)\n", __FILE__, __LINE__, __FUNCTION__
         pos_type seekpos(off_type _offset,
                          std::ios_base::seekdir _dir) override
         {
-printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
             if (!is_open()) {
                 return seek_error;
             }
@@ -463,7 +465,6 @@ printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, thread_identifie
 
                 // we are using a cache file so just seek on it,
                 cache_fstream_.seekg(_offset, _dir);
-                //cache_fstream_.seekp(_offset, _dir);
                 return cache_fstream_.tellg();
 
             } else {
@@ -534,7 +535,7 @@ printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, thread_identifie
             return cache_file_size;
         }
 
-        bool begin_multipart_upload(hashed_named_shared_memory_object& shm_obj, const int& file_open_counter)
+        bool begin_multipart_upload(named_shared_memory_object& shm_obj, const int& file_open_counter)
         {
             auto last_irods_error_code = shm_obj.atomic_exec([](auto& data) {
                 return data.last_irods_error_code;
@@ -571,7 +572,7 @@ printf("%s:%d (%s) [[%d]]\n", __FILE__, __LINE__, __FUNCTION__, thread_identifie
             return true;
         }
 
-        void download_object_to_cache(hashed_named_shared_memory_object& shm_obj)
+        void download_object_to_cache(named_shared_memory_object& shm_obj)
         {
 
             namespace bf = boost::filesystem;
@@ -596,9 +597,11 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                 // Note:  Using the object size passed in (config_.object_size) as no
                 // writes/truncates have been performed at this point.
 
+                // TODO: Do we have enough room for this?
+
                 uint64_t part_size = config_.object_size / config_.number_of_transfer_threads;
 
-                unsigned long long usStart = get_time_in_microseconds();
+                uint64_t start_microseconds = get_time_in_microseconds();
 
                 {
                     irods::thread_pool threads{config_.number_of_transfer_threads};
@@ -637,7 +640,7 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
             }
         }
 
-        int flush_cache_file(hashed_named_shared_memory_object& shm_obj) {
+        int flush_cache_file(named_shared_memory_object& shm_obj) {
 
 
             if (config_.debug_flag) {
@@ -664,8 +667,9 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
 
             ifs.seekg(0, std::ios_base::end);
             off_t cache_file_size = ifs.tellg();
-            uint64_t part_size = cache_file_size / config_.number_of_transfer_threads;
             ifs.close();
+
+            uint64_t part_size = cache_file_size / config_.number_of_transfer_threads;
 
             if (config_.multipart_flag) {
 
@@ -795,7 +799,12 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
             }
 
             object_key_ = _p.string();
+            shmem_key_ = constants::SHARED_MEMORY_KEY_PREFIX +
+                std::to_string(std::hash<std::string>{}(object_key_));
+
             upload_manager_.object_key = object_key_;
+            upload_manager_.shmem_key = shmem_key_;
+
 
             mode_ = _mode;
 
@@ -826,9 +835,7 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
 //            }
 
 
-            auto shared_memory_name =  object_key_ + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
-
-            hashed_named_shared_memory_object shm_obj{shared_memory_name,
+            named_shared_memory_object shm_obj{shmem_key_,
                 constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS,
                 constants::MAX_S3_SHMEM_SIZE};
 
@@ -950,6 +957,8 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
 
         }  // end open_impl
 
+        // TODO remove iRODS error codes
+
         int initiate_multipart_upload()
         {
             namespace bi = boost::interprocess;
@@ -979,9 +988,8 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
             data.thread_identifier = thread_identifier_;
 
             // read shared memory entry for this key
-            auto shared_memory_name =  object_key_ + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
 
-            hashed_named_shared_memory_object shm_obj{shared_memory_name,
+            named_shared_memory_object shm_obj{shmem_key_,
                 config_.shared_memory_timeout_in_seconds,
                 constants::MAX_S3_SHMEM_SIZE};
 
@@ -1041,9 +1049,8 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
             namespace types = shared_data::interprocess_types;
 
             // read shared memory entry for this key
-            auto shared_memory_name =  object_key_ + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
 
-            hashed_named_shared_memory_object shm_obj{shared_memory_name,
+            named_shared_memory_object shm_obj{shmem_key_,
                 config_.shared_memory_timeout_in_seconds,
                 constants::MAX_S3_SHMEM_SIZE};
 
@@ -1065,6 +1072,8 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                     << object_key_ << "\", upload_id=\"" << upload_id << "\"";
                 printf( "%s\n", msg.str().c_str() );
             }
+
+            // TODO put S3StatusOK in libs3_types
             s3_multipart_upload::cancel_callback::g_response_completion_status = S3StatusOK;
             s3_multipart_upload::cancel_callback::g_response_completion_saved_bucket_context = &bucket_context_;
             S3_abort_multipart_upload(&bucket_context_, object_key_.c_str(),
@@ -1089,9 +1098,8 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
             namespace bi = boost::interprocess;
             namespace types = shared_data::interprocess_types;
 
-            auto shared_memory_name =  object_key_ + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
 
-            hashed_named_shared_memory_object shm_obj{shared_memory_name,
+            named_shared_memory_object shm_obj{shmem_key_,
                 config_.shared_memory_timeout_in_seconds,
                 constants::MAX_S3_SHMEM_SIZE};
 
@@ -1186,6 +1194,7 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
         //     length - The length to be downloaded.
         //     offset - If provided this is the offset of the object that is being downloaded.  If not
         //              provided the current offset (file_offset_) is used.
+        // TODO failure mode?
         void s3_download_part_worker_routine(char_type *buffer, uint64_t length, off_t offset = -1)
         {
             namespace bi = boost::interprocess;
@@ -1201,32 +1210,37 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
 
             std::shared_ptr<callback_for_read_from_s3_base<buffer_type>> read_callback;
 
+            // TODO Move read_callback instantiation outside of do/while
+
+
+            S3GetObjectHandler get_object_handler = {
+                {
+                    callback_for_read_from_s3_base<buffer_type>::on_response_properties,
+                    callback_for_read_from_s3_base<buffer_type>::on_response_completion
+                },
+                callback_for_read_from_s3_base<buffer_type>::invoke_callback
+            };
+
+            if (buffer == nullptr) {
+                // Download to cache
+                read_callback.reset(new callback_for_read_from_s3_to_cache<buffer_type>
+                        (bucket_context_));
+                static_cast<callback_for_read_from_s3_to_cache<buffer_type>*>
+                    (read_callback.get())->set_and_open_cache_file(cache_file_path_);
+            } else {
+                // Download to buffer
+                read_callback.reset(new callback_for_read_from_s3_to_buffer<buffer_type>(bucket_context_));
+                static_cast<callback_for_read_from_s3_to_buffer<buffer_type>*>(read_callback.get())
+                    ->set_output_buffer(buffer);
+                static_cast<callback_for_read_from_s3_to_buffer<buffer_type>*>(read_callback.get())
+                    ->set_output_buffer_size(length);
+
+            }
+            read_callback->content_length = length;
+            read_callback->debug_flag = config_.debug_flag;
+            read_callback->thread_identifier = thread_identifier_;
+
             do {
-
-                S3GetObjectHandler get_object_handler = {
-                    {
-                        callback_for_read_from_s3_base<buffer_type>::on_response_properties,
-                        callback_for_read_from_s3_base<buffer_type>::on_response_completion
-                    },
-                    callback_for_read_from_s3_base<buffer_type>::invoke_callback
-                };
-
-                if (buffer == nullptr) {
-                    // Download to cache
-                    read_callback.reset(new callback_for_read_from_s3_to_cache<buffer_type>
-                            (bucket_context_));
-                    static_cast<callback_for_read_from_s3_to_cache<buffer_type>*>
-                        (read_callback.get())->set_and_open_cache_file(cache_file_path_);
-                } else {
-                    // Download to buffer
-                    read_callback.reset(new callback_for_read_from_s3_to_buffer<buffer_type>(bucket_context_));
-                    static_cast<callback_for_read_from_s3_to_buffer<buffer_type>*>(read_callback.get())
-                        ->set_output_buffer(buffer);
-                    static_cast<callback_for_read_from_s3_to_buffer<buffer_type>*>(read_callback.get())
-                        ->set_output_buffer_size(length);
-
-                }
-                read_callback->content_length = length;
 
                 // if we are reading into cache, write to cache file at offset
                 // if reading into buffer, write at beginning of buffer
@@ -1235,8 +1249,6 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                 } else {
                     read_callback->offset = 0;
                 }
-                read_callback->debug_flag = config_.debug_flag;
-                read_callback->thread_identifier = thread_identifier_;
 
                 if (config_.debug_flag) {
                     msg.str( std::string() ); // Clear
@@ -1247,16 +1259,16 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                             msg.str().c_str());
                 }
 
-                unsigned long long usStart = get_time_in_microseconds();
+                uint64_t start_microseconds = get_time_in_microseconds();
                 print_bucket_context(bucket_context_);
                 S3_get_object( &bucket_context_, object_key_.c_str(), NULL,
                         offset, read_callback->content_length, 0,
                         &get_object_handler, read_callback.get() );
 
                 if (config_.debug_flag) {
-                    unsigned long long usEnd = get_time_in_microseconds();
+                    uint64_t end_microseconds = get_time_in_microseconds();
                     double bw = (read_callback->content_length / (1024.0*1024.0)) /
-                        ( (usEnd - usStart) / 1000000.0 );
+                        ( (end_microseconds - start_microseconds) / 1000000.0 );
                     msg << " -- END -- BW=" << bw << " MB/s";
                     printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__,
                             thread_identifier_, msg.str().c_str());
@@ -1282,8 +1294,7 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
 
                 // update the last error in shmem
 
-                auto shared_memory_name =  object_key_ + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
-                hashed_named_shared_memory_object shm_obj{shared_memory_name,
+                named_shared_memory_object shm_obj{shmem_key_,
                     config_.shared_memory_timeout_in_seconds,
                     constants::MAX_S3_SHMEM_SIZE};
 
@@ -1304,9 +1315,8 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
             std::shared_ptr<s3_multipart_upload::callback_for_write_to_s3_base<buffer_type>> write_callback;
 
             // read upload_id from shmem
-            auto shared_memory_name =  object_key_ + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
 
-            hashed_named_shared_memory_object shm_obj{shared_memory_name,
+            named_shared_memory_object shm_obj{shmem_key_,
                 constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS,
                 constants::MAX_S3_SHMEM_SIZE};
 
@@ -1316,119 +1326,126 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
 
             int retry_cnt = 0;
 
-            do {
+            S3PutObjectHandler put_object_handler = {
+                {
+                    s3_multipart_upload::callback_for_write_to_s3_base<buffer_type>::on_response_properties,
+                    s3_multipart_upload::callback_for_write_to_s3_base<buffer_type>::on_response_completion
+                },
+                s3_multipart_upload::callback_for_write_to_s3_base<buffer_type>::invoke_callback
+            };
 
-                S3PutObjectHandler put_object_handler = {
-                    {
-                        s3_multipart_upload::callback_for_write_to_s3_base<buffer_type>::on_response_properties,
-                        s3_multipart_upload::callback_for_write_to_s3_base<buffer_type>::on_response_completion
-                    },
-                    s3_multipart_upload::callback_for_write_to_s3_base<buffer_type>::invoke_callback
-                };
+            off_t offset;
 
-                if (read_from_cache) {
+            if (read_from_cache) {
 
-                    // read from cache
+                // read from cache
 
-                    write_callback.reset(new s3_multipart_upload::callback_for_write_from_cache_to_s3<buffer_type>
-                            (bucket_context_, upload_manager_));
+                write_callback.reset(new s3_multipart_upload::callback_for_write_from_cache_to_s3<buffer_type>
+                        (bucket_context_, upload_manager_));
 
-                    s3_multipart_upload::callback_for_write_from_cache_to_s3<buffer_type>
-                        *write_callback_from_cache =
-                        static_cast<s3_multipart_upload::callback_for_write_from_cache_to_s3<buffer_type>*>
-                        (write_callback.get());
+                s3_multipart_upload::callback_for_write_from_cache_to_s3<buffer_type>
+                    *write_callback_from_cache =
+                    static_cast<s3_multipart_upload::callback_for_write_from_cache_to_s3<buffer_type>*>
+                    (write_callback.get());
 
-                    write_callback_from_cache->set_and_open_cache_file(cache_file_path_);
+                write_callback_from_cache->set_and_open_cache_file(cache_file_path_);
 
-                    off_t offset = part_size * part_number;
-                    uint64_t content_length;
+                offset = part_size * part_number;
+                uint64_t content_length;
 
-                    // get the object size from the cache file
-                    auto object_size = get_cache_file_size();
+                // get the object size from the cache file
+                auto object_size = get_cache_file_size();
 
-                    if (part_number == config_.number_of_transfer_threads - 1) {
-                        content_length = part_size + (object_size -
-                                part_size * config_.number_of_transfer_threads);
-                    } else {
-                        content_length = part_size;
-                    }
-
-                    write_callback->sequence = part_number + 1;
-                    write_callback->content_length = content_length;
-                    write_callback->offset = offset;
-                    write_callback->thread_identifier = thread_identifier_;
-
+                // last thread gets extra bits
+                if (part_number == config_.number_of_transfer_threads - 1) {
+                    content_length = part_size + (object_size -
+                            part_size * config_.number_of_transfer_threads);
                 } else {
-
-                    // Read from buffer
-
-                    write_callback.reset(new
-                            s3_multipart_upload::callback_for_write_from_buffer_to_s3<buffer_type>(
-                                bucket_context_, upload_manager_, circular_buffer_));
-
-                    s3_multipart_upload::callback_for_write_from_buffer_to_s3<buffer_type>
-                        *write_callback_from_buffer =
-                        static_cast<s3_multipart_upload::callback_for_write_from_buffer_to_s3<buffer_type>*>
-                        (write_callback.get());
-
-                    upload_page<buffer_type> page;
-
-                    // read the first page
-                    if (config_.debug_flag) {
-                        printf("%s:%d (%s) [[%d]] waiting to read\n",
-                                __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
-                    }
-                    circular_buffer_.pop_front(page);
-                    if (config_.debug_flag) {
-                        printf("%s:%d (%s) [[%d]] read page [buffer=%p][buffer_size=%lu][terminate_flag=%d]\n",
-                                __FILE__, __LINE__, __FUNCTION__, thread_identifier_, page.buffer.data(),
-                                page.buffer.size(), page.terminate_flag);
-                    }
-                    write_callback_from_buffer->buffer = page.buffer;
-
-                    // determine the sequence number from the offset, file size, and buffer size
-                    // the last page might be larger so doing a little trick to handle that case (second term)
-                    //  Note:  We bailed early if config_.part_size == 0
-                    int sequence = (file_offset_ / config_.part_size) +
-                        (file_offset_ % config_.part_size == 0 ? 0 : 1) + 1;
-
-                    write_callback->sequence = sequence;
-                    write_callback->content_length = config_.part_size;
-
-
-                    // estimate the size and resize the etags vector
-                    int number_of_parts = config_.object_size / config_.part_size;
-                    number_of_parts = number_of_parts < sequence ? sequence : number_of_parts;
-
-                    // resize the etags vector if necessary
-                    int resize_error = shm_obj.atomic_exec([number_of_parts, &shm_obj](auto& data) {
-
-                        if (number_of_parts > data.etags.size()) {
-                            try {
-                                data.etags.resize(number_of_parts, types::shm_char_string("", shm_obj.get_allocator()));
-                            } catch (std::bad_alloc& ba) {
-                                data.last_irods_error_code = SYS_MALLOC_ERR;
-                                return true;
-                            }
-                        }
-
-                        return false;
-
-                    });
-
-                    if (resize_error) {
-                        printf("Error on reallocation of etags buffer in shared memory.");
-                        return;
-                    }
+                    content_length = part_size;
                 }
 
-                write_callback->debug_flag = config_.debug_flag;
-                write_callback->enable_md5 = config_.enable_md5_flag;
-                write_callback->server_encrypt = config_.server_encrypt_flag;
+                write_callback->sequence = part_number + 1;
+                write_callback->content_length = content_length;
+                write_callback->offset = offset;
                 write_callback->thread_identifier = thread_identifier_;
-                write_callback->shared_memory_timeout_in_seconds = constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS;
-                write_callback->thread_identifier = thread_identifier_;
-                write_callback->object_key = object_key_;
+
+            } else {
+
+                // Read from buffer
+
+                write_callback.reset(new
+                        s3_multipart_upload::callback_for_write_from_buffer_to_s3<buffer_type>(
+                            bucket_context_, upload_manager_, circular_buffer_));
+
+                s3_multipart_upload::callback_for_write_from_buffer_to_s3<buffer_type>
+                    *write_callback_from_buffer =
+                    static_cast<s3_multipart_upload::callback_for_write_from_buffer_to_s3<buffer_type>*>
+                    (write_callback.get());
+
+                upload_page<buffer_type> page;
+
+                // read the first page
+                if (config_.debug_flag) {
+                    printf("%s:%d (%s) [[%d]] waiting to read\n",
+                            __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
+                }
+                circular_buffer_.pop_front(page);
+                if (config_.debug_flag) {
+                    printf("%s:%d (%s) [[%d]] read page [buffer=%p][buffer_size=%lu][terminate_flag=%d]\n",
+                            __FILE__, __LINE__, __FUNCTION__, thread_identifier_, page.buffer.data(),
+                            page.buffer.size(), page.terminate_flag);
+                }
+                write_callback_from_buffer->buffer = page.buffer;
+
+                // determine the sequence number from the offset, file size, and buffer size
+                // the last page might be larger so doing a little trick to handle that case (second term)
+                //  Note:  We bailed early if config_.part_size == 0
+                int sequence = (file_offset_ / config_.part_size) +
+                    (file_offset_ % config_.part_size == 0 ? 0 : 1) + 1;
+
+                write_callback->sequence = sequence;
+                write_callback->content_length = config_.part_size;
+
+                // estimate the size and resize the etags vector
+                int number_of_parts = config_.object_size / config_.part_size;
+                number_of_parts = number_of_parts < sequence ? sequence : number_of_parts;
+
+                // resize the etags vector if necessary
+                int resize_error = shm_obj.atomic_exec([number_of_parts, &shm_obj](auto& data) {
+
+                    if (number_of_parts > data.etags.size()) {
+                        try {
+                            data.etags.resize(number_of_parts, types::shm_char_string("", shm_obj.get_allocator()));
+                        } catch (std::bad_alloc& ba) {
+                            data.last_irods_error_code = SYS_MALLOC_ERR;
+                            return true;
+                        }
+                    }
+
+                    return false;
+
+                });
+
+                if (resize_error) {
+                    printf("Error on reallocation of etags buffer in shared memory.");
+                    return;
+                }
+            }
+
+            write_callback->debug_flag = config_.debug_flag;
+            write_callback->enable_md5 = config_.enable_md5_flag;
+            write_callback->server_encrypt = config_.server_encrypt_flag;
+            write_callback->thread_identifier = thread_identifier_;
+            write_callback->shared_memory_timeout_in_seconds = constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS;
+            write_callback->thread_identifier = thread_identifier_;
+            write_callback->object_key = object_key_;
+            write_callback->shmem_key = shmem_key_;
+
+            do {
+
+                if (read_from_cache) {
+                    write_callback->offset = offset;
+                }
 
                 std::stringstream msg;
 
@@ -1450,7 +1467,7 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                 //    partData.put_object_data.content_length, resource_name );
                 //}
                 put_props_.expires = -1;
-                unsigned long long usStart = get_time_in_microseconds();
+                uint64_t start_microseconds = get_time_in_microseconds();
 
                 if (config_.debug_flag) {
                     printf("%s:%d (%s) [[%d]] S3_upload_part (ctx, %s, props, handler, %d, "
@@ -1469,10 +1486,10 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                             S3_get_status_name(write_callback->status));
                 }
 
-                unsigned long long usEnd = get_time_in_microseconds();
+                uint64_t end_microseconds = get_time_in_microseconds();
                 //double bw = (mpu_data_[sequence-1].put_object_data.content_length /
                 //   (1024.0 * 1024.0)) /
-                //   ( (usEnd - usStart) / 1000000.0 );
+                //   ( (end_microseconds - start_microseconds) / 1000000.0 );
                 if (config_.debug_flag) {
                     std::stringstream msg;
                     msg << "Multipart:  -- END -- BW=";// << bw << " MB/s";
@@ -1570,6 +1587,7 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                 write_callback->server_encrypt = config_.server_encrypt_flag;
                 write_callback->thread_identifier = thread_identifier_;
                 write_callback->object_key = object_key_;
+                write_callback->shmem_key = shmem_key_;
 
                 std::stringstream msg;
 
@@ -1581,7 +1599,7 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                 //    partData.put_object_data.content_length, resource_name );
                 //}
                 put_props_.expires = -1;
-                unsigned long long usStart = get_time_in_microseconds();
+                uint64_t start_microseconds = get_time_in_microseconds();
 
                 if (config_.debug_flag) {
                     printf("%s:%d (%s) [[%d]] S3_put_object(ctx, %s, "
@@ -1600,7 +1618,7 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                             S3_get_status_name(write_callback->status));
                 }
 
-                unsigned long long usEnd = get_time_in_microseconds();
+                uint64_t end_microseconds = get_time_in_microseconds();
 
                 if (write_callback->status != S3StatusOK) s3_sleep( config_.retry_wait_seconds, 0 );
             } while ((write_callback->status != S3StatusOK) && S3_status_is_retryable(write_callback->status) &&
@@ -1618,6 +1636,7 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
         int                          fd_;
         nlohmann::json               fd_info_;
         std::string                  object_key_;
+        std::string                  shmem_key_;
         libs3_types::bucket_context  bucket_context_;
         upload_manager               upload_manager_;
         S3SignatureVersion           s3_signature_version_;

@@ -11,6 +11,7 @@
 
 namespace irods::experimental::interprocess
 {
+
     namespace shared_memory
     {
         namespace bi = boost::interprocess;

@@ -8,12 +8,12 @@
 #include <string>
 #include <thread>
 #include <vector>
-#include <stdio.h>
+#include <cstdio>
 #include <iostream>
 #include <mutex>
 #include <condition_variable>
 #include <new>
-#include <time.h>
+#include <ctime>
 #include <fstream>
 
 // boost includes
@@ -32,7 +32,7 @@
 #include <boost/filesystem.hpp>
 
 // local includes
-#include "hashed_managed_shared_memory_object.hpp"
+#include "managed_shared_memory_object.hpp"
 #include "s3_multipart_shared_data.hpp"
 #include "s3_transport_types.hpp"
 
@@ -232,6 +232,7 @@ namespace irods::experimental::io::s3_transport
                     , thread_identifier{0}
                     , debug_flag{false}
                     , object_key{}
+                    , shmem_key{}
                 {}
 
 
@@ -272,6 +273,7 @@ namespace irods::experimental::io::s3_transport
                 bool                         server_encrypt;
                 int                          thread_identifier;
                 std::string                  object_key;
+                std::string                  shmem_key;
 
                 uint64_t                     offset;
                 uint64_t                     content_length;
@@ -476,6 +478,7 @@ namespace irods::experimental::io::s3_transport
                     , thread_identifier{0}
                     , debug_flag{false}
                     , object_key{}
+                    , shmem_key{}
                 {}
 
 
@@ -500,15 +503,15 @@ namespace irods::experimental::io::s3_transport
                     callback_for_write_to_s3_base *callback_for_write_to_s3_base_data
                         = static_cast<callback_for_write_to_s3_base*>(callback_data);
 
-                    using hashed_named_shared_memory_object =
-                        irods::experimental::interprocess::shared_memory::hashed_named_shared_memory_object
+                    using named_shared_memory_object =
+                        irods::experimental::interprocess::shared_memory::named_shared_memory_object
                         <shared_data::multipart_shared_data>;
 
                     const auto& object_key = callback_for_write_to_s3_base_data->object_key;
 
-                    auto shared_memory_name =  object_key + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
+                    auto shmem_key =  callback_for_write_to_s3_base_data->shmem_key;
 
-                    hashed_named_shared_memory_object shm_obj{shared_memory_name,
+                    named_shared_memory_object shm_obj{shmem_key,
                         constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS,
                         constants::MAX_S3_SHMEM_SIZE};
 
@@ -559,6 +562,7 @@ namespace irods::experimental::io::s3_transport
                 int                          thread_identifier;
                 time_t                       shared_memory_timeout_in_seconds;
                 std::string                  object_key;
+                std::string                  shmem_key;
 
                 int                          sequence;
                 uint64_t                     offset;       // For multiple upload
@@ -713,12 +717,6 @@ namespace irods::experimental::io::s3_transport
                 uint64_t bytes_written;
 
         };
-
-        namespace part_transport_callback
-        {
-
-        } // end namespace part_transport_callback
-
 
         namespace cancel_callback
         {

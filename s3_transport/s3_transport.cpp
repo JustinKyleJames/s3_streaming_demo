@@ -14,12 +14,12 @@
 #include <string>
 #include <thread>
 #include <vector>
-#include <stdio.h>
+#include <cstdio>
 #include <iostream>
 #include <mutex>
 #include <condition_variable>
 #include <new>
-#include <time.h>
+#include <ctime>
 
 // boost includes
 #include <boost/algorithm/string/predicate.hpp>
@@ -28,7 +28,6 @@
 #include <boost/interprocess/containers/vector.hpp>
 #include <boost/interprocess/containers/list.hpp>
 #include <boost/interprocess/allocators/allocator.hpp>
-#include <boost/interprocess/managed_shared_memory.hpp>
 #include <boost/interprocess/containers/string.hpp>
 #include <boost/interprocess/sync/named_mutex.hpp>
 #include <boost/container/scoped_allocator.hpp>
@@ -37,7 +36,6 @@
 #include <boost/filesystem.hpp>
 
 // local includes
-#include "hashed_managed_shared_memory_object.hpp"
 #include "s3_multipart_shared_data.hpp"
 #include "s3_transport.hpp"
 
@@ -149,8 +147,8 @@ namespace irods::experimental::io::s3_transport
             libs3_types::status on_response (const libs3_types::char_type* upload_id,
                                           void *callback_data )
             {
-                using hashed_named_shared_memory_object =
-                    irods::experimental::interprocess::shared_memory::hashed_named_shared_memory_object
+                using named_shared_memory_object =
+                    irods::experimental::interprocess::shared_memory::named_shared_memory_object
                     <shared_data::multipart_shared_data>;
                 // upload upload_id in shared memory
                 // no need to shared_memory_lock as this should already be locked
@@ -158,13 +156,11 @@ namespace irods::experimental::io::s3_transport
                 // upload upload_id in shared memory
                 upload_manager *manager = (upload_manager *)callback_data;
 
-                // upload upload_id in shared memory
-                // upload upload_id in shared memory
                 std::string& object_key = manager->object_key;
-                auto shared_memory_name =  object_key + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
+                std::string& shmem_key = manager->shmem_key;
 
                 // upload upload_id in shared memory
-                hashed_named_shared_memory_object shm_obj{shared_memory_name,
+                named_shared_memory_object shm_obj{shmem_key,
                     constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS,
                     constants::MAX_S3_SHMEM_SIZE};
 
@@ -275,8 +271,8 @@ namespace irods::experimental::io::s3_transport
             libs3_types::status on_response (const libs3_types::char_type* upload_id,
                                           void *callback_data )
             {
-                using hashed_named_shared_memory_object =
-                    irods::experimental::interprocess::shared_memory::hashed_named_shared_memory_object
+                using named_shared_memory_object =
+                    irods::experimental::interprocess::shared_memory::named_shared_memory_object
                     <shared_data::multipart_shared_data>;
                 // upload upload_id in shared memory
                 // no need to shared_memory_lock as this should already be locked
@@ -287,10 +283,10 @@ namespace irods::experimental::io::s3_transport
                 // upload upload_id in shared memory
                 // upload upload_id in shared memory
                 std::string& object_key = manager->object_key;
-                auto shared_memory_name =  object_key + constants::MULTIPART_SHARED_MEMORY_EXTENSION;
+                std::string& shmem_key = manager->shmem_key;
 
                 // upload upload_id in shared memory
-                hashed_named_shared_memory_object shm_obj{shared_memory_name,
+                named_shared_memory_object shm_obj{shmem_key,
                     constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS,
                     constants::MAX_S3_SHMEM_SIZE};
 

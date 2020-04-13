@@ -17,12 +17,12 @@
 #include <string>
 #include <thread>
 #include <vector>
-#include <stdio.h>
+#include <cstdio>
 #include <iostream>
 #include <mutex>
 #include <condition_variable>
 #include <new>
-#include <time.h>
+#include <ctime>
 
 // boost includes
 #include <boost/algorithm/string/predicate.hpp>
@@ -40,7 +40,6 @@
 #include <boost/filesystem.hpp>
 
 // local includes
-#include "hashed_managed_shared_memory_object.hpp"
 #include "s3_multipart_shared_data.hpp"
 
 #include "s3_transport_types.hpp"
@@ -58,7 +57,7 @@ namespace irods::experimental::io::s3_transport
                                                           UPLOAD_ID_SIZE + 1};
 
         static const int                DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS{900};
-        inline static const std::string MULTIPART_SHARED_MEMORY_EXTENSION{"-shm"};
+        inline static const std::string SHARED_MEMORY_KEY_PREFIX{"s3-shm-"};
     };
 
     void print_bucket_context( const libs3_types::bucket_context& bucket_context );
@@ -116,6 +115,7 @@ namespace irods::experimental::io::s3_transport
         bool                     debug_flag;
         libs3_types::status      status;            /* status returned by libs3 */
         std::string              object_key;
+        std::string              shmem_key;
         time_t                   shared_memory_timeout_in_seconds;
     };
 
