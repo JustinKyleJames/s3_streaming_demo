@@ -69,7 +69,7 @@ namespace irods::experimental::io::s3_transport
                                                               void *callback_data)
             {
                 // Don't need to do anything here
-                return S3StatusOK;
+                return libs3_types::status_ok;
             }
 
             static void on_response_completion (libs3_types::status status,
@@ -125,7 +125,7 @@ namespace irods::experimental::io::s3_transport
                 if (wrote>0) this->offset += wrote;
 
                 return ((wrote < static_cast<decltype(wrote)>(libs3_buffer_size)) ?
-                        S3StatusAbortedByCallback : S3StatusOK);
+                        S3StatusAbortedByCallback : libs3_types::status_ok);
 
             }
 
@@ -179,7 +179,7 @@ namespace irods::experimental::io::s3_transport
                 this->offset += bytes_to_write;
 
                 return ((bytes_to_write < static_cast<ssize_t>(libs3_buffer_size)) ?
-                        S3StatusAbortedByCallback : S3StatusOK);
+                        S3StatusAbortedByCallback : libs3_types::status_ok);
 
             }
 
@@ -251,7 +251,7 @@ namespace irods::experimental::io::s3_transport
                 static libs3_types::status on_response_properties(const libs3_types::response_properties *properties,
                                                                   void *callback_data)
                 {
-                    return S3StatusOK;
+                    return libs3_types::status_ok;
                 }
 
                 static void on_response_completion (libs3_types::status status,
@@ -538,7 +538,7 @@ namespace irods::experimental::io::s3_transport
                             data.etags[callback_for_write_to_s3_base_data->sequence - 1] = "";
                         }
 
-                        return S3StatusOK;
+                        return libs3_types::status_ok;
                     });
                 }
 

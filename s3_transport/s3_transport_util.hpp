@@ -156,7 +156,7 @@ namespace irods::experimental::io::s3_transport
             : manager{_manager}
             , put_object_data{_bucket_context, _circular_buffer}
             , sequence{0}
-            , status{S3StatusOK}
+            , status{libs3_types::status_ok}
             , enable_md5{false}
             , server_encrypt{false}
             , debug_flag{false}
@@ -183,7 +183,7 @@ namespace irods::experimental::io::s3_transport
         data_for_head_callback(libs3_types::bucket_context& _bucket_context, bool _debug_flag = false)
             : last_modified{0}
             , content_length{0}
-            , status{S3StatusOK}
+            , status{libs3_types::status_ok}
             , debug_flag{_debug_flag}
             , bucket_context{_bucket_context}
         {}

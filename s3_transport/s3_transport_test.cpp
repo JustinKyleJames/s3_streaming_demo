@@ -347,9 +347,8 @@ void open_file_with_read_write(int thread_number,
     s3_transport tp1{s3_config};
     dstream ds1{tp1, s3_prefix + filename};
 
-    if (ds1.fail()) {
-        printf("%s:%d (%s) DBG open failed! thread=%u\n",
-                __FILE__, __LINE__, __FUNCTION__, thread_number);
+    if (!ds1.is_open()) {
+        printf("[%d] Open failed.  Exiting...\n", thread_number);
         return;
     }
 
@@ -447,6 +446,12 @@ void upload_part(int thread_number,
 
     s3_transport tp1{s3_config};
     odstream ds1{tp1, s3_prefix + filename};
+
+    if (!ds1.is_open()) {
+        printf("[%d] Open failed.  Exiting...\n", thread_number);
+        return;
+    }
+
     ds1.seekp(start);
 
     // doing two writes here just to test that that works
@@ -541,8 +546,15 @@ void download_part(int thread_number,
     s3_transport tp1{s3_config};
 
     idstream ds1{tp1, s3_prefix + filename};
+
+    if (!ds1.is_open()) {
+        printf("[%d] Open failed.  Exiting...\n", thread_number);
+        return;
+    }
+
     ds1.seekg(start);
     ds1.read(current_buffer, current_buffer_size);
+
 
     /*****************************************/
 

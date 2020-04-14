@@ -67,12 +67,12 @@ namespace irods::experimental::io::s3_transport
     {
 
         pStatus = status;
-        if( debug_flag || status != S3StatusOK ) {
+        if( debug_flag || status != libs3_types::status_ok ) {
             printf( "  libs3_types::status: [%s] - %d\n", S3_get_status_name( status ), static_cast<int>(status) );
             printf( "    S3Host: %s\n", saved_bucket_context.hostName );
         }
 
-        if (debug_flag || status != S3StatusOK)
+        if (debug_flag || status != libs3_types::status_ok)
             printf( "  Function: %s\n", function.c_str() );
         if ((debug_flag || error) && error->message)
             printf( "  Message: %s\n", error->message);
@@ -123,7 +123,7 @@ namespace irods::experimental::io::s3_transport
         libs3_types::status on_response_properties (const libs3_types::response_properties *properties,
                                                     void *callback_data)
         {
-            return S3StatusOK;
+            return libs3_types::status_ok;
         }
 
         void on_response_complete (libs3_types::status status,
@@ -170,13 +170,13 @@ namespace irods::experimental::io::s3_transport
                 });
 
                 // upload upload_id in shared memory
-                return S3StatusOK;
+                return libs3_types::status_ok;
             } // end on_response
 
             libs3_types::status on_response_properties (const libs3_types::response_properties *properties,
                                                      void *callback_data)
             {
-                return S3StatusOK;
+                return libs3_types::status_ok;
             } // end on_response_properties
 
             void on_response_complete (libs3_types::status status,
@@ -214,7 +214,7 @@ namespace irods::experimental::io::s3_transport
             libs3_types::status on_response_properties (const libs3_types::response_properties *properties,
                                           void *callback_data)
             {
-                return S3StatusOK;
+                return libs3_types::status_ok;
             } // end response_properties
 
             void on_response_completion (libs3_types::status status,
@@ -234,13 +234,13 @@ namespace irods::experimental::io::s3_transport
 
         namespace cancel_callback
         {
-            libs3_types::status g_response_completion_status = S3StatusOK;
+            libs3_types::status g_response_completion_status = libs3_types::status_ok;
             libs3_types::bucket_context *g_response_completion_saved_bucket_context = nullptr;
 
             libs3_types::status on_response_properties (const libs3_types::response_properties *properties,
                                           void *callback_data)
             {
-                return S3StatusOK;
+                return libs3_types::status_ok;
             } // response_properties
 
             // S3_abort_multipart_upload() does not allow a callback_data parameter, so pass the
@@ -296,13 +296,13 @@ namespace irods::experimental::io::s3_transport
                 });
 
                 // upload upload_id in shared memory
-                return S3StatusOK;
+                return libs3_types::status_ok;
             } // end on_response
 
             libs3_types::status on_response_properties (const libs3_types::response_properties *properties,
                                                      void *callback_data)
             {
-                return S3StatusOK;
+                return libs3_types::status_ok;
             } // end on_response_properties
 
             void on_response_complete (libs3_types::status status,
@@ -340,7 +340,7 @@ namespace irods::experimental::io::s3_transport
             libs3_types::status on_response_properties (const libs3_types::response_properties *properties,
                                           void *callback_data)
             {
-                return S3StatusOK;
+                return libs3_types::status_ok;
             } // end response_properties
 
             void on_response_completion (libs3_types::status status,
@@ -360,13 +360,13 @@ namespace irods::experimental::io::s3_transport
 
         namespace cancel_callback
         {
-            libs3_types::status g_response_completion_status = S3StatusOK;
+            libs3_types::status g_response_completion_status = libs3_types::status_ok;
             libs3_types::bucket_context *g_response_completion_saved_bucket_context = nullptr;
 
             libs3_types::status on_response_properties (const libs3_types::response_properties *properties,
                                           void *callback_data)
             {
-                return S3StatusOK;
+                return libs3_types::status_ok;
             } // response_properties
 
             // S3_abort_multipart_upload() does not allow a callback_data parameter, so pass the

@@ -215,7 +215,6 @@ namespace irods::experimental::io::s3_transport
         bool object_exists_in_s3() {
 
             // TODO get this working, remove
-            return true;
 
             data_for_head_callback data(bucket_context_, config_.debug_flag);
 
@@ -223,7 +222,7 @@ namespace irods::experimental::io::s3_transport
                 &s3_head_object_callback::on_response_complete };
 
             S3_head_object(&bucket_context_, object_key_.c_str(), 0, &head_object_handler, &data);
-            return S3StatusOK == data.status;
+            return libs3_types::status_ok == data.status;
         }
 
 
@@ -266,16 +265,17 @@ namespace irods::experimental::io::s3_transport
 
         bool close(const on_close_success* _on_close_success = nullptr) override
         {
+printf("%s:%d (%s) [[%d]] Close ran\n", __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
 
             namespace bi = boost::interprocess;
             namespace types = shared_data::interprocess_types;
 
+            bool last_file_to_close = false;
             bool return_value = true;
 
             if (!is_open()) {
                 return false;
             }
-
 
             fd_ = uninitialized_file_descriptor;
 
@@ -314,7 +314,6 @@ namespace irods::experimental::io::s3_transport
 
             });
 
-            bool last_file_to_close;
             {
 
                 bi::scoped_lock file_close_lock(*file_open_close_mutex);
@@ -331,7 +330,7 @@ namespace irods::experimental::io::s3_transport
                 });
 
                 if (config_.debug_flag) {
-                    printf("%s:%d (%s) DBG [[%d]] [last_file_to_close=%d]\n",
+                    printf("%s:%d (%s) [[%d]] [last_file_to_close=%d]\n",
                             __FILE__, __LINE__, __FUNCTION__, thread_identifier_,
                             last_file_to_close);
                     fflush(stdout);
@@ -370,7 +369,6 @@ namespace irods::experimental::io::s3_transport
 
                 }
 
-
             }
 
             int shm_obj_ref_count = shm_obj.atomic_exec([](auto& data)
@@ -385,6 +383,7 @@ namespace irods::experimental::io::s3_transport
 
             return return_value;
         }
+
 
         std::streamsize receive(char_type* _buffer,
                                 std::streamsize _buffer_size) override
@@ -525,6 +524,7 @@ namespace irods::experimental::io::s3_transport
         }
 
     private:
+
 
         auto get_cache_file_size() -> uint64_t
         {
@@ -808,8 +808,8 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
 
             mode_ = _mode;
 
-            bool object_exists = object_exists_in_s3();
             int open_flags = populate_open_mode_flags();
+
             if (open_flags == translation_error) {
                 printf("%s:%d (%s) [[%d]] Invalid open mode detected.\n",
                         __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
@@ -828,12 +828,36 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                     (open_flags & O_ACCMODE) == O_RDONLY);
             }
 
-//            if (object_must_exist_ && !object_exists) {
-//                printf("%s:%d (%s) [[%d]] Object does not exist and open mode requires it to exist.\n",
-//                       __FILE__, __LINE__, __FUNCTION__);
-//                return false;
-//            }
+            // each process must intitialize S3
+            {
+                std::lock_guard<std::mutex> lock(s3_initialized_counter_mutex_);
+                if (s3_initialized_counter_ == 0) {
 
+                    int flags = S3_INIT_ALL;
+
+                    if (s3_signature_version_ == S3SignatureV4) {
+                        flags |= S3_INIT_SIGNATURE_V4;
+                    }
+
+                    int status = S3_initialize( "s3", flags, bucket_context_.hostName );
+                    if (status != libs3_types::status_ok) {
+                        fprintf(stderr, "S3_initialize returned error\n");
+                        return false;
+                    }
+                }
+                ++s3_initialized_counter_;
+            }
+
+            bool object_exists = false;
+
+            if (object_must_exist_ || download_to_cache_) {
+                object_exists = object_exists_in_s3();
+            }
+
+            if (object_must_exist_ && !object_exists) {
+                fprintf(stderr, "Object does not exist and open mode requires it to exist.\n");
+                return false;
+            }
 
             named_shared_memory_object shm_obj{shmem_key_,
                 constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS,
@@ -841,37 +865,15 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
 
             // only allow open/close to run one at a time for this object
             bi::interprocess_recursive_mutex* file_open_close_mutex =
-                shm_obj.atomic_exec([](auto& data)
-            {
+                shm_obj.atomic_exec([](auto& data) {
                         return &(data.file_open_close_mutex);
 
             });
             bi::scoped_lock file_open_lock(*file_open_close_mutex);
 
             auto file_open_counter = shm_obj.atomic_exec([this](auto& data) {
-                return ++(data.file_open_counter);
+                    return ++(data.file_open_counter);
             });
-
-            // each process must intitialize S3
-            // note: locked from file_open_lock so no need to lock
-            // with s3_initialized_counter_mutex_
-            if (s3_initialized_counter_ == 0) {
-
-                int flags = S3_INIT_ALL;
-
-                if (s3_signature_version_ == S3SignatureV4) {
-                    flags |= S3_INIT_SIGNATURE_V4;
-                }
-
-                int status = S3_initialize( "s3", flags, bucket_context_.hostName );
-                if (status != S3StatusOK) {
-                    fprintf(stderr, "S3_initialize returned error\n");
-                    return false;
-                }
-
-            }
-
-            ++s3_initialized_counter_;
 
             if (object_exists && download_to_cache_) {
                 download_object_to_cache(shm_obj);
@@ -885,6 +887,8 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
 
                     bool multipart_upload_success = begin_multipart_upload(shm_obj, file_open_counter);
                     if (!multipart_upload_success) {
+                        fprintf(stderr, "Initiate multipart failed.\n");
+                        critical_error_encountered_ = true;
                         return false;
                     }
 
@@ -946,7 +950,6 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                 fd_ = fd;
 
                 if (!seek_to_end_if_required(mode_)) {
-                    close();
                     critical_error_encountered_ = true;
                     return false;
                 }
@@ -1018,15 +1021,15 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                                 __FUNCTION__, thread_identifier_, S3_get_status_name(upload_manager_.status));
                     }
 
-                    if (upload_manager_.status != S3StatusOK) {
+                    if (upload_manager_.status != libs3_types::status_ok) {
                         s3_sleep( config_.retry_wait_seconds, 0 );
                     }
 
-                } while ( (upload_manager_.status != S3StatusOK)
+                } while ( (upload_manager_.status != libs3_types::status_ok)
                         && S3_status_is_retryable(upload_manager_.status)
                         && ( ++retry_cnt < config_.retry_count_limit));
 
-                if ("" == data.upload_id || upload_manager_.status != S3StatusOK) {
+                if ("" == data.upload_id || upload_manager_.status != libs3_types::status_ok) {
                     return S3_PUT_ERROR;
                 }
 
@@ -1073,13 +1076,12 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                 printf( "%s\n", msg.str().c_str() );
             }
 
-            // TODO put S3StatusOK in libs3_types
-            s3_multipart_upload::cancel_callback::g_response_completion_status = S3StatusOK;
+            s3_multipart_upload::cancel_callback::g_response_completion_status = libs3_types::status_ok;
             s3_multipart_upload::cancel_callback::g_response_completion_saved_bucket_context = &bucket_context_;
             S3_abort_multipart_upload(&bucket_context_, object_key_.c_str(),
                     upload_id.c_str(), &abort_handler);
             status = s3_multipart_upload::cancel_callback::g_response_completion_status;
-            if (status != S3StatusOK) {
+            if (status != libs3_types::status_ok) {
                 msg.str( std::string() ); // Clear
                 msg << "] " << __FUNCTION__
                     << " - Error cancelling the multipart upload of S3 object: \""
@@ -1155,12 +1157,12 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                             printf("%s:%d (%s) [[%d]] [manager.status=%s]\n", __FILE__, __LINE__,
                                     __FUNCTION__, thread_identifier_, S3_get_status_name(upload_manager_.status));
                         }
-                        if (upload_manager_.status != S3StatusOK) s3_sleep( config_.retry_wait_seconds, 0 );
-                    } while ((upload_manager_.status != S3StatusOK) &&
+                        if (upload_manager_.status != libs3_types::status_ok) s3_sleep( config_.retry_wait_seconds, 0 );
+                    } while ((upload_manager_.status != libs3_types::status_ok) &&
                             S3_status_is_retryable(upload_manager_.status) &&
                             ( ++retry_cnt < config_.retry_count_limit));
 
-                    if (upload_manager_.status != S3StatusOK) {
+                    if (upload_manager_.status != libs3_types::status_ok) {
                         msg.str( std::string() ); // Clear
                         msg << __FUNCTION__ << " - Error putting the S3 object: \""
                             << object_key_ << "\"";
@@ -1209,9 +1211,6 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
             }
 
             std::shared_ptr<callback_for_read_from_s3_base<buffer_type>> read_callback;
-
-            // TODO Move read_callback instantiation outside of do/while
-
 
             S3GetObjectHandler get_object_handler = {
                 {
@@ -1274,13 +1273,13 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                             thread_identifier_, msg.str().c_str());
                 }
 
-                if (read_callback->status != S3StatusOK) s3_sleep( config_.retry_wait_seconds, 0 );
+                if (read_callback->status != libs3_types::status_ok) s3_sleep( config_.retry_wait_seconds, 0 );
 
-            } while ((read_callback->status != S3StatusOK)
+            } while ((read_callback->status != libs3_types::status_ok)
                     && S3_status_is_retryable(read_callback->status)
                     && (++retry_cnt < config_.retry_count_limit));
 
-            if (read_callback->status != S3StatusOK) {
+            if (read_callback->status != libs3_types::status_ok) {
                 msg.str( std::string() ); // Clear
                 msg << " - Error getting the S3 object: \"" << object_key_ << " ";
                 if (read_callback->status >= 0) {
@@ -1290,7 +1289,7 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                         thread_identifier_, msg.str().c_str());
             }
 
-            if (read_callback->status != S3StatusOK) {
+            if (read_callback->status != libs3_types::status_ok) {
 
                 // update the last error in shmem
 
@@ -1496,11 +1495,11 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                     printf( "%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, thread_identifier_,
                             msg.str().c_str() );
                 }
-                if (write_callback->status != S3StatusOK) s3_sleep( config_.retry_wait_seconds, 0 );
-            } while ((write_callback->status != S3StatusOK) && S3_status_is_retryable(write_callback->status) &&
+                if (write_callback->status != libs3_types::status_ok) s3_sleep( config_.retry_wait_seconds, 0 );
+            } while ((write_callback->status != libs3_types::status_ok) && S3_status_is_retryable(write_callback->status) &&
                     (++retry_cnt < config_.retry_count_limit));
 
-            if (write_callback->status != S3StatusOK) {
+            if (write_callback->status != libs3_types::status_ok) {
 
                 shm_obj.atomic_exec([](auto& data) {
                     data.last_irods_error_code = S3_PUT_ERROR;
@@ -1620,11 +1619,11 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
 
                 uint64_t end_microseconds = get_time_in_microseconds();
 
-                if (write_callback->status != S3StatusOK) s3_sleep( config_.retry_wait_seconds, 0 );
-            } while ((write_callback->status != S3StatusOK) && S3_status_is_retryable(write_callback->status) &&
+                if (write_callback->status != libs3_types::status_ok) s3_sleep( config_.retry_wait_seconds, 0 );
+            } while ((write_callback->status != libs3_types::status_ok) && S3_status_is_retryable(write_callback->status) &&
                     (++retry_cnt < config_.retry_count_limit));
 
-            if (write_callback->status != S3StatusOK) {
+            if (write_callback->status != libs3_types::status_ok) {
                 return S3_PUT_ERROR;
             }
 
