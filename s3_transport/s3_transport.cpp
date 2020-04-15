@@ -123,6 +123,8 @@ namespace irods::experimental::io::s3_transport
         libs3_types::status on_response_properties (const libs3_types::response_properties *properties,
                                                     void *callback_data)
         {
+            data_for_head_callback *data = (data_for_head_callback*)callback_data;
+            data->content_length = properties->contentLength;
             return libs3_types::status_ok;
         }
 

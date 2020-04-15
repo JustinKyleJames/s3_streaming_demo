@@ -18,6 +18,18 @@ namespace irods::experimental::io::s3_transport
         using response_properties = S3ResponseProperties;
     };
 
+    enum class error_codes
+    {
+        SUCCESS,
+        OUT_OF_DISK_SPACE,
+        BAD_ALLOC,
+        BYTES_TRANSFERRED_MISMATCH,
+        INITIATE_MULTIPART_UPLOAD_ERROR,
+        COMPLETE_MULTIPART_UPLOAD_ERROR,
+        UPLOAD_FILE_ERROR,
+        DOWNLOAD_FILE_ERROR
+    };
+
 } // irods::experimental::io::s3_transport
 
 #endif // S3_TRANSPORT_TYPES_HPP

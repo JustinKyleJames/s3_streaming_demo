@@ -212,9 +212,7 @@ namespace irods::experimental::io::s3_transport
             if (put_props_.md5) free( (char*)put_props_.md5 );
         }
 
-        bool object_exists_in_s3() {
-
-            // TODO get this working, remove
+        bool object_exists_in_s3(uint64_t& object_size) {
 
             data_for_head_callback data(bucket_context_, config_.debug_flag);
 
@@ -222,6 +220,9 @@ namespace irods::experimental::io::s3_transport
                 &s3_head_object_callback::on_response_complete };
 
             S3_head_object(&bucket_context_, object_key_.c_str(), 0, &head_object_handler, &data);
+
+            object_size = data.content_length;
+
             return libs3_types::status_ok == data.status;
         }
 
@@ -265,7 +266,6 @@ namespace irods::experimental::io::s3_transport
 
         bool close(const on_close_success* _on_close_success = nullptr) override
         {
-printf("%s:%d (%s) [[%d]] Close ran\n", __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
 
             namespace bi = boost::interprocess;
             namespace types = shared_data::interprocess_types;
@@ -346,7 +346,7 @@ printf("%s:%d (%s) [[%d]] Close ran\n", __FILE__, __LINE__, __FUNCTION__, thread
 
                     if (use_cache_) {
 
-                        if (0 != flush_cache_file(shm_obj)) {
+                        if (error_codes::SUCCESS != flush_cache_file(shm_obj)) {
                             fprintf(stderr, "%s:%d (%s) [[%d]] flush_cache_file returned error",
                                     __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
                             return_value = false;
@@ -357,7 +357,7 @@ printf("%s:%d (%s) [[%d]] Close ran\n", __FILE__, __LINE__, __FUNCTION__, thread
                         return_value = shm_obj.atomic_exec( [this, &shm_obj, open_flags](auto& data) {
 
                             if ( is_full_multipart_upload(open_flags) ) {
-                                if (0 > complete_multipart_upload()) {
+                                if (error_codes::SUCCESS != complete_multipart_upload()) {
                                     return false;
                                 }
                             }
@@ -396,9 +396,7 @@ printf("%s:%d (%s) [[%d]] Close ran\n", __FILE__, __LINE__, __FUNCTION__, thread
 
             // Not using cache.
             // just get what is asked for
-            // TODO did we return _buffer_size bytes?
-            s3_download_part_worker_routine(_buffer, _buffer_size);
-            return _buffer_size;
+            return s3_download_part_worker_routine(_buffer, _buffer_size);
         }
 
         std::streamsize send(const char_type* _buffer,
@@ -537,34 +535,34 @@ printf("%s:%d (%s) [[%d]] Close ran\n", __FILE__, __LINE__, __FUNCTION__, thread
 
         bool begin_multipart_upload(named_shared_memory_object& shm_obj, const int& file_open_counter)
         {
-            auto last_irods_error_code = shm_obj.atomic_exec([](auto& data) {
-                return data.last_irods_error_code;
+            auto last_error_code = shm_obj.atomic_exec([](auto& data) {
+                return data.last_error_code;
             });
 
             // first one in initiates the multipart (everyone has same shared_memory_lock)
-            if (last_irods_error_code >= 0 && file_open_counter == 1) {
+            if (last_error_code == error_codes::SUCCESS && file_open_counter == 1) {
 
                 // send initiate message to S3
-                int ret = shm_obj.atomic_exec([this](auto& data) {
+                error_codes ret = shm_obj.atomic_exec([this](auto& data) {
                     return initiate_multipart_upload();
                 });
 
-                if (ret < 0) {
-                    fprintf(stderr, "%s:%d (%s) [[%d]] open returning false [last_irods_error_code=%d]\n",
+                if (error_codes::SUCCESS != ret) {
+                    fprintf(stderr, "%s:%d (%s) [[%d]] open returning false [last_error_code=%d]\n",
                             __FILE__, __LINE__, __FUNCTION__, thread_identifier_, ret);
 
                     // update the last error
                     shm_obj.atomic_exec([ret](auto& data) {
-                        data.last_irods_error_code = ret;
+                        data.last_error_code = ret;
                     });
 
                     return false;
                 }
             } else {
-                if (last_irods_error_code < 0) {
-                    fprintf(stderr, "%s:%d (%s) [[%d]] open returning false [last_irods_error_code=%d]\n",
+                if (error_codes::SUCCESS != last_error_code) {
+                    fprintf(stderr, "%s:%d (%s) [[%d]] open returning false [last_error_code=%d]\n",
                             __FILE__, __LINE__, __FUNCTION__, thread_identifier_,
-                            last_irods_error_code);
+                            last_error_code);
                     return false;
                 }
             }
@@ -572,7 +570,7 @@ printf("%s:%d (%s) [[%d]] Close ran\n", __FILE__, __LINE__, __FUNCTION__, thread
             return true;
         }
 
-        void download_object_to_cache(named_shared_memory_object& shm_obj)
+        error_codes download_object_to_cache(named_shared_memory_object& shm_obj, uint64_t s3_object_size)
         {
 
             namespace bf = boost::filesystem;
@@ -580,7 +578,6 @@ printf("%s:%d (%s) [[%d]] Close ran\n", __FILE__, __LINE__, __FUNCTION__, thread
             bf::path cache_file =  bf::path(config_.cache_directory) / bf::path(object_key_ + "-cache");
             bf::path parent_path = cache_file.parent_path();
             boost::filesystem::create_directory(parent_path);
-printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__, __FUNCTION__, thread_identifier_, cache_file.string().c_str(), parent_path.string().c_str());
             cache_file_path_ = cache_file.string();
 
             bool cache_file_download_started_flag = shm_obj.atomic_exec([](auto& data) {
@@ -594,41 +591,66 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
 
                 // download the object to a cache file
 
-                // Note:  Using the object size passed in (config_.object_size) as no
-                // writes/truncates have been performed at this point.
+                uint64_t disk_space_available = bf::space(config_.cache_directory).available;
 
-                // TODO: Do we have enough room for this?
+                // TODO test failure scenario
+                if (s3_object_size > disk_space_available) {
+                    fprintf(stderr, "%s:%d (%s) [[%d]] Not enough disk space to download object to cache.\n",
+                            __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
+                    return error_codes::OUT_OF_DISK_SPACE;
+                }
 
-                uint64_t part_size = config_.object_size / config_.number_of_transfer_threads;
+                uint64_t bytes_downloaded = 0;
+                std::mutex bytes_downloaded_mutex;
 
+                // each part must be at least 5MB in size
+                uint64_t minimum_part_size = 5 * 1024 * 1024;
+                int number_of_transfer_threads
+                    = minimum_part_size * config_.number_of_transfer_threads < s3_object_size 
+                    ? config_.number_of_transfer_threads
+                    : s3_object_size / minimum_part_size;
+
+                uint64_t part_size = s3_object_size / number_of_transfer_threads;
                 uint64_t start_microseconds = get_time_in_microseconds();
 
                 {
-                    irods::thread_pool threads{config_.number_of_transfer_threads};
+                    irods::thread_pool threads{number_of_transfer_threads};
 
                     for (unsigned int thr_id= 0; thr_id < config_.number_of_transfer_threads; ++thr_id) {
 
-                        irods::thread_pool::post(threads, [this, thr_id, part_size] () {
+                        irods::thread_pool::post(threads, [this, thr_id, part_size, s3_object_size,
+                                &bytes_downloaded, &bytes_downloaded_mutex] () {
 
                                 off_t this_part_offset = part_size * thr_id;
                                 uint64_t this_part_size;
 
                                 if (thr_id == config_.number_of_transfer_threads - 1) {
-                                    this_part_size = part_size + (config_.object_size -
+                                    this_part_size = part_size + (s3_object_size -
                                             part_size * config_.number_of_transfer_threads);
                                 } else {
                                     this_part_size = part_size;
                                 }
 
-                                this->s3_download_part_worker_routine(nullptr, this_part_size, this_part_offset);
+                                uint64_t this_bytes_downloaded =
+                                    this->s3_download_part_worker_routine(nullptr, this_part_size, this_part_offset);
+
+                                {
+                                    std::lock_guard<std::mutex> lock(bytes_downloaded_mutex);
+                                    bytes_downloaded += this_bytes_downloaded;
+                                }
                         });
                     }
                     threads.join();
+
+                    if (bytes_downloaded != s3_object_size) {
+                        return error_codes::BYTES_TRANSFERRED_MISMATCH;
+                    }
                 }
 
                 shm_obj.atomic_exec([](auto& data) {
                     data.cache_file_download_completed_flag = true;
                 });
+
             }
 
             // download has started so we must wait until it completes before continuing
@@ -638,16 +660,18 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
             while (!(shm_obj.atomic_exec([](auto& data) { return data.cache_file_download_completed_flag; }))) {
                 sleep(1);
             }
+
+            return error_codes::SUCCESS;
         }
 
-        int flush_cache_file(named_shared_memory_object& shm_obj) {
-
+        error_codes flush_cache_file(named_shared_memory_object& shm_obj) {
 
             if (config_.debug_flag) {
                 printf("%s:%d (%s) [[%d]] Flushing cache file.\n",
                         __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
             }
-            int return_value = 0;
+
+            error_codes return_value = error_codes::SUCCESS;
 
             namespace bf = boost::filesystem;
 
@@ -662,7 +686,7 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
             if (!ifs) {
                 fprintf(stderr, "%s:%d (%s) [[%d]] Failed to open cache file.\n",
                         __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
-                return S3_PUT_ERROR;
+                return error_codes::UPLOAD_FILE_ERROR;
             }
 
             ifs.seekg(0, std::ios_base::end);
@@ -849,9 +873,10 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
             }
 
             bool object_exists = false;
+            uint64_t s3_object_size = 0;
 
             if (object_must_exist_ || download_to_cache_) {
-                object_exists = object_exists_in_s3();
+                object_exists = object_exists_in_s3(s3_object_size);
             }
 
             if (object_must_exist_ && !object_exists) {
@@ -871,13 +896,17 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
             });
             bi::scoped_lock file_open_lock(*file_open_close_mutex);
 
+
+            if (object_exists && download_to_cache_) {
+
+                if (error_codes::SUCCESS != download_object_to_cache(shm_obj, s3_object_size)) {
+                    return false;
+                }
+            }
+
             auto file_open_counter = shm_obj.atomic_exec([this](auto& data) {
                     return ++(data.file_open_counter);
             });
-
-            if (object_exists && download_to_cache_) {
-                download_object_to_cache(shm_obj);
-            }
 
             if ( is_full_upload(open_flags) ) {
 
@@ -912,22 +941,15 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
 
                     bf::path cache_file =  bf::path(config_.cache_directory) / bf::path(object_key_ + "-cache");
                     cache_file_path_ = cache_file.string();
-                    cache_fstream_.open(cache_file_path_.c_str(), _mode);
+                    cache_fstream_.open(cache_file_path_.c_str(),
+                            std::ios_base::in | std::ios_base::out | std::ios_base::app);
 
                     if (!cache_fstream_) {
-                        fprintf(stderr, "Failed to open cache file.\n");
+                        fprintf(stderr, "%s:%d (%s) [[%d]] Failed to open cache file.\n",
+                                __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
                         critical_error_encountered_ = true;
                         return false;
                     }
-
-                    /*cache_fstream_.exceptions ( std::fstream::failbit | std::fstream::badbit );
-
-                    try {
-                        cache_fstream_.open(cache_file_path_.c_str(), _mode);
-                    } catch (std::fstream::failure e) {
-                        fprintf(stderr, "Failed to open cache file.\n");
-                        return false;
-                    }*/
 
                     if (!seek_to_end_if_required(mode_)) {
                         critical_error_encountered_ = true;
@@ -955,14 +977,13 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                 }
             }
 
+
             return true;
 
 
         }  // end open_impl
 
-        // TODO remove iRODS error codes
-
-        int initiate_multipart_upload()
+        error_codes initiate_multipart_upload()
         {
             namespace bi = boost::interprocess;
             namespace types = shared_data::interprocess_types;
@@ -1030,7 +1051,7 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                         && ( ++retry_cnt < config_.retry_count_limit));
 
                 if ("" == data.upload_id || upload_manager_.status != libs3_types::status_ok) {
-                    return S3_PUT_ERROR;
+                    return error_codes::INITIATE_MULTIPART_UPLOAD_ERROR;
                 }
 
                 if (config_.debug_flag) {
@@ -1041,7 +1062,8 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                 upload_manager_.remaining = 0;
                 upload_manager_.offset  = 0;
 
-                return static_cast<IRODS_ERROR_ENUM>(0);
+                return error_codes::SUCCESS;
+
             });
 
         } // end initiate_multipart_upload
@@ -1095,7 +1117,7 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
         } // end mpu_cancel
 
 
-        int complete_multipart_upload()
+        error_codes complete_multipart_upload()
         {
             namespace bi = boost::interprocess;
             namespace types = shared_data::interprocess_types;
@@ -1106,7 +1128,7 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                 constants::MAX_S3_SHMEM_SIZE};
 
             // no lock here as it is already locked
-            int result = shm_obj.exec([this](auto& data) {
+            error_codes result = shm_obj.exec([this](auto& data) {
 
                 std::stringstream msg;
                 unsigned int retry_cnt = 0;
@@ -1115,7 +1137,7 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
 
                 std::string upload_id  = data.upload_id.c_str();
 
-                if (0 == data.last_irods_error_code) { // If someone aborted, don't complete...
+                if (error_codes::SUCCESS == data.last_error_code) { // If someone aborted, don't complete...
                     if (config_.debug_flag) {
                         msg.str( std::string() ); // Clear
                         msg << "Multipart:  Completing key \"" << object_key_.c_str() << "\" Upload ID \""
@@ -1169,20 +1191,21 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                         if(upload_manager_.status >= 0) {
                             msg << " - \"" << S3_get_status_name( upload_manager_.status ) << "\"";
                         }
-                        return S3_PUT_ERROR;
+                        return error_codes::UPLOAD_FILE_ERROR;
                     }
                 }
-                if (0 > data.last_irods_error_code && "" != data.upload_id ) {
+
+                if (error_codes::SUCCESS != data.last_error_code && "" != data.upload_id ) {
 
                     // Someone aborted after we started, delete the partial object on S3
                     printf("Cancelling multipart upload\n");
                     mpu_cancel();
 
                     // Return the error
-                    return static_cast<IRODS_ERROR_ENUM>(data.last_irods_error_code);
+                    return data.last_error_code;
                 }
 
-                return static_cast<IRODS_ERROR_ENUM>(0);
+                return error_codes::SUCCESS;
 
             });
 
@@ -1196,8 +1219,7 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
         //     length - The length to be downloaded.
         //     offset - If provided this is the offset of the object that is being downloaded.  If not
         //              provided the current offset (file_offset_) is used.
-        // TODO failure mode?
-        void s3_download_part_worker_routine(char_type *buffer, uint64_t length, off_t offset = -1)
+        std::streamsize s3_download_part_worker_routine(char_type *buffer, uint64_t length, off_t offset = -1)
         {
             namespace bi = boost::interprocess;
             namespace types = shared_data::interprocess_types;
@@ -1298,9 +1320,12 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                     constants::MAX_S3_SHMEM_SIZE};
 
                 shm_obj.atomic_exec([](auto& data) {
-                    data.last_irods_error_code = S3_GET_ERROR;
+                    data.last_error_code = error_codes::DOWNLOAD_FILE_ERROR;
                 });
+
             }
+
+            return read_callback->bytes_read_from_s3;
 
         } // end s3_download_part_worker_routine
 
@@ -1416,7 +1441,7 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                         try {
                             data.etags.resize(number_of_parts, types::shm_char_string("", shm_obj.get_allocator()));
                         } catch (std::bad_alloc& ba) {
-                            data.last_irods_error_code = SYS_MALLOC_ERR;
+                            data.last_error_code = error_codes::BAD_ALLOC;
                             return true;
                         }
                     }
@@ -1502,12 +1527,12 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
             if (write_callback->status != libs3_types::status_ok) {
 
                 shm_obj.atomic_exec([](auto& data) {
-                    data.last_irods_error_code = S3_PUT_ERROR;
+                    data.last_error_code = error_codes::UPLOAD_FILE_ERROR;
                 });
             }
         }
 
-        int s3_upload_file(bool read_from_cache = false)
+        error_codes s3_upload_file(bool read_from_cache = false)
         {
 
             namespace bi = boost::interprocess;
@@ -1624,10 +1649,10 @@ printf("%s:%d (%s) [[%d]] [cache_file=%s][parent_path=%s]\n", __FILE__, __LINE__
                     (++retry_cnt < config_.retry_count_limit));
 
             if (write_callback->status != libs3_types::status_ok) {
-                return S3_PUT_ERROR;
+                return error_codes::UPLOAD_FILE_ERROR;
             }
 
-            return static_cast<IRODS_ERROR_ENUM>(0);
+            return error_codes::SUCCESS;
 
         } // end s3_upload_file
 

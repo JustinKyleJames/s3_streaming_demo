@@ -51,6 +51,7 @@ namespace irods::experimental::io::s3_transport
                 , offset{0}
                 , content_length{0}
                 , thread_identifier{0}
+                , bytes_read_from_s3{0}
             {}
 
             virtual libs3_types::status callback_implementation(int libs3_buffer_size,
@@ -87,6 +88,7 @@ namespace irods::experimental::io::s3_transport
 
             uint64_t                     offset;       /* For multiple upload */
             uint64_t                     content_length;
+            uint64_t                     bytes_read_from_s3;
             libs3_types::status          status;
             libs3_types::bucket_context& saved_bucket_context; /* To enable more detailed error messages */
             bool                         debug_flag;
@@ -122,7 +124,10 @@ namespace irods::experimental::io::s3_transport
                 cache_fstream.write(libs3_buffer, libs3_buffer_size);
 
                 auto wrote = static_cast<uint64_t>(cache_fstream.tellp()) - this->offset;
-                if (wrote>0) this->offset += wrote;
+                if (wrote>0) {
+                    this->offset += wrote;
+                    this->bytes_read_from_s3 += wrote;
+                }
 
                 return ((wrote < static_cast<decltype(wrote)>(libs3_buffer_size)) ?
                         S3StatusAbortedByCallback : libs3_types::status_ok);
@@ -177,6 +182,7 @@ namespace irods::experimental::io::s3_transport
                 memcpy(output_buffer + this->offset, libs3_buffer, bytes_to_write);
 
                 this->offset += bytes_to_write;
+                this->bytes_read_from_s3 += bytes_to_write;
 
                 return ((bytes_to_write < static_cast<ssize_t>(libs3_buffer_size)) ?
                         S3StatusAbortedByCallback : libs3_types::status_ok);
