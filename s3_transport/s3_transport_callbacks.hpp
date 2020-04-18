@@ -1,9 +1,6 @@
 #ifndef S3_TRANSPORT_CALLBACKS_HPP
 #define S3_TRANSPORT_CALLBACKS_HPP
 
-#include "circular_buffer.hpp"
-
-
 // stdlib and misc includes
 #include <string>
 #include <thread>
@@ -32,6 +29,7 @@
 #include <boost/filesystem.hpp>
 
 // local includes
+#include "circular_buffer.hpp"
 #include "managed_shared_memory_object.hpp"
 #include "s3_multipart_shared_data.hpp"
 #include "s3_transport_types.hpp"

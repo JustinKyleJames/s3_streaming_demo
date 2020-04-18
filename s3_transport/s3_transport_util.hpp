@@ -6,8 +6,8 @@
 // iRODS includes
 #include <rcMisc.h>
 #include <transport/transport.hpp>
-#include <fileLseek.h>
-#include <rs_get_file_descriptor_info.hpp>
+//#include <fileLseek.h>
+//#include <rs_get_file_descriptor_info.hpp>
 
 // misc includes
 #include "json.hpp"

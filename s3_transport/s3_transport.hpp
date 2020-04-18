@@ -4,12 +4,9 @@
 #include "circular_buffer.hpp"
 
 // iRODS includes
-#include <rcMisc.h>
 #include <transport/transport.hpp>
-#include <fileLseek.h>
-#include <rs_get_file_descriptor_info.hpp>
 #include <thread_pool.hpp>
-#include <utility>
+#include <rcMisc.h>
 
 // misc includes
 #include "json.hpp"
