@@ -44,6 +44,6 @@ namespace experimental {
 
     }; // class circular_buffer
 
-} // namespace experimental 
+} // namespace experimental
 } // namespace irods
 #endif

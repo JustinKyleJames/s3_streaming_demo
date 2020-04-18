@@ -85,15 +85,6 @@ namespace irods::experimental::io::s3_transport
        bool               terminate_flag;
     };
 
-    // TODO how is this used?  remove?  keep for now until stat is implemented
-    struct s3_stat
-    {
-        std::string key;
-        uint64_t    size;
-        time_t      last_modified;
-    };
-
-
     struct upload_manager
     {
         upload_manager(libs3_types::bucket_context& _saved_bucket_context)
@@ -146,37 +137,6 @@ namespace irods::experimental::io::s3_transport
         bool                debug_flag;
         int                 thread_identifier;
     };
-
-    template <typename buffer_type>
-    struct multipart_data
-    {
-        multipart_data(upload_manager& _manager,
-                       libs3_types::bucket_context& _bucket_context,
-                       irods::experimental::circular_buffer<upload_page<buffer_type>>& _circular_buffer)
-            : manager{_manager}
-            , put_object_data{_bucket_context, _circular_buffer}
-            , sequence{0}
-            , status{libs3_types::status_ok}
-            , enable_md5{false}
-            , server_encrypt{false}
-            , debug_flag{false}
-            , thread_identifier{0}
-            , shared_memory_timeout_in_seconds{constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS}
-        {}
-
-
-        int                                    sequence;           // sequence or part number
-        int                                    mode;               // PUT or COPY
-        data_for_write_callback<buffer_type>   put_object_data;
-        std::reference_wrapper<upload_manager> manager;
-        libs3_types::status                    status;
-        bool                                   enable_md5;
-        bool                                   server_encrypt;
-        bool                                   debug_flag;
-        int                                    thread_identifier;
-        time_t                                 shared_memory_timeout_in_seconds;
-    };
-
 
     struct data_for_head_callback
     {

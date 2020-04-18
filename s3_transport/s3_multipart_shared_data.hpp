@@ -10,6 +10,7 @@
 #include <boost/interprocess/containers/string.hpp>
 #include <boost/interprocess/sync/named_mutex.hpp>
 #include <boost/container/scoped_allocator.hpp>
+#include <boost/interprocess/sync/scoped_lock.hpp>
 
 #include "s3_transport_types.hpp"
 
@@ -44,30 +45,35 @@ namespace irods::experimental::io::s3_transport::shared_data
             , upload_id{allocator}
             , etags{allocator}
             , last_error_code{error_codes::SUCCESS}
-            , cache_file_download_started_flag{false}
-            , cache_file_download_completed_flag{false}
+            , cache_file_download_progress{cache_file_download_status::NOT_STARTED}
             , ref_count{0}
         {}
 
         void reset_fields()
         {
+            printf("reset fields ran\n");
             file_open_counter = 0;
             upload_id = "";
             etags.clear();
             last_error_code = error_codes::SUCCESS;
-            cache_file_download_started_flag = false;
-            cache_file_download_completed_flag = false;
+            cache_file_download_progress = cache_file_download_status::NOT_STARTED;
+            ref_count = 1;   // current object has reference so ref_count = 1
+
+            // we need to unlock the mutex but there is no way to force it
+            // instead just build a new object in place on top of old
+            new (&file_open_close_mutex) interprocess_recursive_mutex(); // in with the new!
+
+            boost::interprocess::scoped_lock lock(file_open_close_mutex);
         }
 
         int                                   file_open_counter;
         interprocess_types::shm_char_string   upload_id;
         interprocess_types::shm_string_vector etags;
         error_codes                           last_error_code;
-        bool                                  cache_file_download_started_flag;
-        bool                                  cache_file_download_completed_flag;
+        cache_file_download_status            cache_file_download_progress;
         int                                   ref_count;
 
-        interprocess_recursive_mutex file_open_close_mutex;
+        interprocess_recursive_mutex          file_open_close_mutex;
 
     };
 

@@ -163,7 +163,7 @@ namespace irods::experimental::io::s3_transport
 
                 // upload upload_id in shared memory
                 named_shared_memory_object shm_obj{shmem_key,
-                    constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS,
+                    manager->shared_memory_timeout_in_seconds,
                     constants::MAX_S3_SHMEM_SIZE};
 
                 // upload upload_id in shared memory - already locked here
@@ -289,7 +289,7 @@ namespace irods::experimental::io::s3_transport
 
                 // upload upload_id in shared memory
                 named_shared_memory_object shm_obj{shmem_key,
-                    constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS,
+                    manager->shared_memory_timeout_in_seconds,
                     constants::MAX_S3_SHMEM_SIZE};
 
                 // upload upload_id in shared memory - already locked here

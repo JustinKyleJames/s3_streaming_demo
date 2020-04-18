@@ -61,12 +61,13 @@ namespace irods::experimental::interprocess
                 , alloc_inst_{shm_.get_segment_manager()}
 
             {
-
                 const time_t now = time(0);
 
                 object_ = shm_.find_or_construct<ipc_object>(SHARED_DATA_NAME.c_str())
                     (  static_cast<void_allocator>(shm_.get_segment_manager()), now,
                        std::forward<Args>(args)...);
+
+                bi::scoped_lock lk{object_->access_mutex};
 
                 (object_->thing.ref_count)++;
 
@@ -78,7 +79,7 @@ namespace irods::experimental::interprocess
                 if (shmem_has_expired) {
                     object_->thing.reset_fields();
                 }
-
+                object_->last_access_time_in_seconds = now;
             }
 
             ~named_shared_memory_object()
@@ -96,12 +97,14 @@ namespace irods::experimental::interprocess
             auto atomic_exec(Function _func) const
             {
                 bi::scoped_lock lk{object_->access_mutex};
+                object_->last_access_time_in_seconds = time(0);
                 return _func(object_->thing);
             }
 
             template <typename Function>
             auto exec(Function _func) const
             {
+                object_->last_access_time_in_seconds = time(0);
                 return _func(object_->thing);
             }
 

@@ -17,15 +17,15 @@ using dstream             = irods::experimental::io::dstream;
 using s3_transport        = irods::experimental::io::s3_transport::s3_transport<char>;
 using s3_transport_config = irods::experimental::io::s3_transport::config;
 
-void upload_part(int thread_number, const int thread_count, const uint32_t file_size,
+void upload_part(int thread_number, const int thread_count, const uint64_t file_size,
                  const bool debug_flag, const char *hostname, const char *bucket_name,
                  const char *access_key, const char *secret_access_key, const char *filename);
 
-void download_part(int thread_number, const int thread_count, const uint32_t file_size,
+void download_part(int thread_number, const int thread_count, const uint64_t file_size,
                    const bool debug_flag, const char *hostname, const char *bucket_name,
                    const char *access_key, const char *secret_access_key, const char *filename);
 
-void open_file_with_read_write(int thread_number, const int thread_count, const uint32_t file_size,
+void open_file_with_read_write(int thread_number, const int thread_count, const uint64_t file_size,
                                const bool debug_flag, const char *hostname,
                                const char *bucket_name, const char * access_key,
                                const char *secret_access_key, const char *filename);
@@ -160,7 +160,7 @@ int main(int argc, char **argv)
     }
 
     // determine file size
-    uint32_t file_size;
+    uint64_t file_size;
     std::ifstream ifs;
     ifs.open(filename, std::ios::in | std::ios::binary | std::ios::ate);
     if (!ifs.good()) {
@@ -322,7 +322,7 @@ printf("%s:%d (%s) =============== thread_count=%zu ==================\n", __FIL
 // to test downloading file to cache
 void open_file_with_read_write(int thread_number,
                                const int thread_count,
-                               const uint32_t file_size,
+                               const uint64_t file_size,
                                const bool debug_flag,
                                const char *hostname,
                                const char *bucket_name,
@@ -343,6 +343,7 @@ void open_file_with_read_write(int thread_number,
     s3_config.thread_identifier = thread_number;
     s3_config.debug_flag = debug_flag;
     s3_config.multipart_flag = use_multipart_flag;
+    s3_config.shared_memory_timeout_in_seconds = 60;
 
     s3_transport tp1{s3_config};
     dstream ds1{tp1, s3_prefix + filename};
@@ -389,7 +390,7 @@ void open_file_with_read_write(int thread_number,
 
 void upload_part(int thread_number,
                  const int thread_count,
-                 const uint32_t file_size,
+                 const uint64_t file_size,
                  const bool debug_flag,
                  const char *hostname,
                  const char *bucket_name,
@@ -403,8 +404,8 @@ void upload_part(int thread_number,
             __FILE__, __LINE__, __FUNCTION__, thread_number, thread_number);
 
     // thread in irods only deal with sequential bytes.  figure out what bytes this thread deals with
-    uint32_t start = thread_number * (file_size / thread_count);
-    uint32_t end = 0;
+    uint64_t start = thread_number * (file_size / thread_count);
+    uint64_t end = 0;
     if (thread_number == thread_count - 1) {
         end = file_size;
     } else {
@@ -421,9 +422,19 @@ void upload_part(int thread_number,
 
     ifs.seekg(start, std::ios::beg);
 
+    uint64_t current_buffer_size = end - start;
 
-    uint32_t current_buffer_size = end - start;
-    char *current_buffer = new char[current_buffer_size];
+    printf("%s:%d (%s) [[seq=%u]]  [start=%ld][end=%ld][size=%ld]\n",
+            __FILE__, __LINE__, __FUNCTION__, thread_number, start, end, current_buffer_size);
+
+    char *current_buffer;
+    try {
+        current_buffer = new char[current_buffer_size];
+    } catch(std::bad_alloc&) {
+        fprintf(stderr, "failed to allocate memory for buffer.  exiting...\n");
+        return;
+    }
+
     ifs.read((char*)(current_buffer), current_buffer_size);
 
     printf("%s:%d (%s) [thread=%u, seq=%u] done reading file\n",
@@ -443,6 +454,7 @@ void upload_part(int thread_number,
     s3_config.thread_identifier = thread_number;
     s3_config.debug_flag = debug_flag;
     s3_config.multipart_flag = use_multipart_flag;
+    s3_config.shared_memory_timeout_in_seconds = 60;
 
     s3_transport tp1{s3_config};
     odstream ds1{tp1, s3_prefix + filename};
@@ -478,7 +490,7 @@ void upload_part(int thread_number,
 
 void download_part(int thread_number,
                    const int thread_count,
-                   const uint32_t file_size,
+                   const uint64_t file_size,
                    const bool debug_flag,
                    const char *hostname,
                    const char *bucket_name,
@@ -486,7 +498,7 @@ void download_part(int thread_number,
                    const char *secret_access_key,
                    const char *filename)
 {
-    printf("%s(%d, %d, %u, %d, %s, %s, %s, %s, %s)\n",
+    printf("%s(%d, %d, %lu, %d, %s, %s, %s, %s, %s)\n",
           __FUNCTION__,
           thread_number,
           thread_count,
@@ -528,7 +540,7 @@ void download_part(int thread_number,
      * This part actually goes in S3 plugin. *
      *****************************************/
 
-    printf("tp1{%u, %d, %d, %d, %s, %s, %s, %s, %d, %s, %s, %s, %d}\n",
+    printf("tp1{%lu, %d, %d, %d, %s, %s, %s, %s, %d, %s, %s, %s, %d}\n",
             file_size, 100, 1, 1, hostname, bucket_name, access_key,
             secret_access_key, true, "V4", "http", "amz", true);
 
@@ -542,6 +554,7 @@ void download_part(int thread_number,
     s3_config.thread_identifier = thread_number;
     s3_config.debug_flag = debug_flag;
     s3_config.multipart_flag = use_multipart_flag;
+    s3_config.shared_memory_timeout_in_seconds = 60;
 
     s3_transport tp1{s3_config};
 

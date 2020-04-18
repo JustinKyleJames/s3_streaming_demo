@@ -30,6 +30,14 @@ namespace irods::experimental::io::s3_transport
         DOWNLOAD_FILE_ERROR
     };
 
+    enum class cache_file_download_status
+    {
+        NOT_STARTED,
+        STARTED,
+        SUCCESS,
+        FAILED
+    };
+
 } // irods::experimental::io::s3_transport
 
 #endif // S3_TRANSPORT_TYPES_HPP

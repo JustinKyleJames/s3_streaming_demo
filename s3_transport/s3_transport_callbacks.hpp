@@ -52,6 +52,9 @@ namespace irods::experimental::io::s3_transport
                 , content_length{0}
                 , thread_identifier{0}
                 , bytes_read_from_s3{0}
+                , shmem_key{}
+                , shared_memory_timeout_in_seconds{constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS}
+                , callback_counter{0}
             {}
 
             virtual libs3_types::status callback_implementation(int libs3_buffer_size,
@@ -61,8 +64,23 @@ namespace irods::experimental::io::s3_transport
                                                        const libs3_types::char_type *libs3_buffer,
                                                        void *callback_data)
             {
+                using named_shared_memory_object =
+                    irods::experimental::interprocess::shared_memory::named_shared_memory_object
+                    <shared_data::multipart_shared_data>;
+
                 callback_for_read_from_s3_base *data =
                     (callback_for_read_from_s3_base*)callback_data;
+
+                // just touch shmem so we know we are active
+                if (data->callback_counter++ % 10000 == 0) {
+                    auto shmem_key =  data->shmem_key;
+                    auto shared_memory_timeout_in_seconds = data->shared_memory_timeout_in_seconds;
+
+                    named_shared_memory_object shm_obj{shmem_key,
+                        shared_memory_timeout_in_seconds,
+                        constants::MAX_S3_SHMEM_SIZE};
+                }
+
                 return data->callback_implementation(libs3_buffer_size, libs3_buffer);
             }
 
@@ -93,6 +111,13 @@ namespace irods::experimental::io::s3_transport
             libs3_types::bucket_context& saved_bucket_context; /* To enable more detailed error messages */
             bool                         debug_flag;
             int                          thread_identifier;
+            std::string                  shmem_key;
+            time_t                       shared_memory_timeout_in_seconds;
+
+            // Counter incremented each data callback.  Every Nth iteration touch shared memory
+            // so that we know the process didn't die and leave shared memory corrupted
+            int                          callback_counter;
+
     };
 
     template <typename buffer_type>
@@ -239,6 +264,8 @@ namespace irods::experimental::io::s3_transport
                     , debug_flag{false}
                     , object_key{}
                     , shmem_key{}
+                    , shared_memory_timeout_in_seconds{constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS}
+                    , callback_counter{0}
                 {}
 
 
@@ -249,8 +276,24 @@ namespace irods::experimental::io::s3_transport
                                            libs3_types::char_type *libs3_buffer,
                                            void *callback_data)
                 {
+
+                    using named_shared_memory_object =
+                        irods::experimental::interprocess::shared_memory::named_shared_memory_object
+                        <shared_data::multipart_shared_data>;
+
                     callback_for_write_to_s3_base *data =
                         (callback_for_write_to_s3_base*)callback_data;
+
+                    // just touch shmem so we know we are active
+                    if (data->callback_counter++ % 10000 == 0) {
+                        auto shmem_key =  data->shmem_key;
+                        auto shared_memory_timeout_in_seconds = data->shared_memory_timeout_in_seconds;
+
+                        named_shared_memory_object shm_obj{shmem_key,
+                            shared_memory_timeout_in_seconds,
+                            constants::MAX_S3_SHMEM_SIZE};
+                    }
+
                     return data->callback_implementation(libs3_buffer_size, libs3_buffer);
                 }
 
@@ -280,6 +323,7 @@ namespace irods::experimental::io::s3_transport
                 int                          thread_identifier;
                 std::string                  object_key;
                 std::string                  shmem_key;
+                time_t                       shared_memory_timeout_in_seconds;
 
                 uint64_t                     offset;
                 uint64_t                     content_length;
@@ -287,6 +331,10 @@ namespace irods::experimental::io::s3_transport
                 bool                         debug_flag;
                 upload_manager&              manager;
                 uint64_t                     bytes_written;
+
+                // Counter incremented each data callback.  Every Nth iteration touch shared memory
+                // so that we know the process didn't die and leave shared memory corrupted
+                int                          callback_counter;
 
         };
 
@@ -485,6 +533,8 @@ namespace irods::experimental::io::s3_transport
                     , debug_flag{false}
                     , object_key{}
                     , shmem_key{}
+                    , shared_memory_timeout_in_seconds{constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS}
+                    , callback_counter{0}
                 {}
 
 
@@ -495,8 +545,24 @@ namespace irods::experimental::io::s3_transport
                                            libs3_types::char_type *libs3_buffer,
                                            void *callback_data)
                 {
+
+                    using named_shared_memory_object =
+                        irods::experimental::interprocess::shared_memory::named_shared_memory_object
+                        <shared_data::multipart_shared_data>;
+
                     callback_for_write_to_s3_base *data =
                         (callback_for_write_to_s3_base*)callback_data;
+
+                    // just touch shmem so we know we are active
+                    if (data->callback_counter++ % 10000 == 0) {
+                        auto shmem_key =  data->shmem_key;
+                        auto shared_memory_timeout_in_seconds = data->shared_memory_timeout_in_seconds;
+
+                        named_shared_memory_object shm_obj{shmem_key,
+                            shared_memory_timeout_in_seconds,
+                            constants::MAX_S3_SHMEM_SIZE};
+                    }
+
                     return data->callback_implementation(libs3_buffer_size, libs3_buffer);
                 }
 
@@ -516,9 +582,11 @@ namespace irods::experimental::io::s3_transport
                     const auto& object_key = callback_for_write_to_s3_base_data->object_key;
 
                     auto shmem_key =  callback_for_write_to_s3_base_data->shmem_key;
+                    auto shared_memory_timeout_in_seconds =
+                        callback_for_write_to_s3_base_data->shared_memory_timeout_in_seconds;
 
                     named_shared_memory_object shm_obj{shmem_key,
-                        constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS,
+                        shared_memory_timeout_in_seconds,
                         constants::MAX_S3_SHMEM_SIZE};
 
                     return shm_obj.atomic_exec([properties,
@@ -579,6 +647,11 @@ namespace irods::experimental::io::s3_transport
                 upload_manager&              manager;
 
                 uint64_t                     bytes_written;
+
+
+                // Counter incremented each data callback.  Every Nth iteration touch shared memory
+                // so that we know the process didn't die and leave shared memory corrupted
+                int                          callback_counter;
 
         };
 
