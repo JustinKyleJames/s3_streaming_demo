@@ -1,12 +1,26 @@
-s3_transport_test: s3_transport_test.cpp s3_transport.hpp circular_buffer.hpp s3_multipart_shared_data.hpp s3_transport.cpp s3_transport_types.hpp s3_transport_util.hpp s3_transport_callbacks.hpp managed_shared_memory_object.hpp
-	/opt/irods-externals/clang6.0-0/bin/clang++ s3_transport_test.cpp s3_transport.cpp -g -o s3_transport_test -std=c++17 -I/opt/irods-externals/json3.1.2-0/include -I. -I/opt/irods-externals/jansson2.7-0/include -I/opt/irods-externals/boost1.67.0-0/include -I/opt/irods-externals/libs3a30e55e8-0/include -stdlib=libc++ -lboost_system -lboost_filesystem -lcrypto -lz -lrt -ls3 -pthread -lc++abi -L/opt/irods-externals/boost1.67.0-0/lib/ -Wl,-rpath,/opt/irods-externals/clang-runtime6.0-0/lib -L/opt/irods-externals/libs3a30e55e8-0/lib -I/usr/include/irods -I/usr/include/libxml2 -Wl,-rpath,/opt/irods-externals/boost1.67.0-0/lib/ -Wl,-rpath,/opt/irods-externals/libs3a30e55e8-1/lib /opt/irods-externals/jansson2.7-0/lib/libjansson.a -lboost_thread
+INCL_DIRS=-I./include -I/opt/irods-externals/boost1.67.0-0/include -I/opt/irods-externals/jansson2.7-0/include -I/opt/irods-externals/json3.1.2-0/include -I/opt/irods-externals/libs3a30e55e8-0/include -I/usr/include/irods -I/usr/include/libxml2
 
-s3_transport_test_failure: s3_transport_test.cpp s3_transport.hpp circular_buffer.hpp s3_multipart_shared_data.hpp s3_transport.cpp s3_transport_types.hpp s3_transport_util.hpp s3_transport_callbacks.hpp managed_shared_memory_object.hpp
-	/opt/irods-externals/clang6.0-0/bin/clang++ -DTRIGGER_SPACE_FAILED=true s3_transport_test.cpp s3_transport.cpp -g -o s3_transport_test_failure -std=c++17 -I/opt/irods-externals/json3.1.2-0/include -I. -I/opt/irods-externals/jansson2.7-0/include -I/opt/irods-externals/boost1.67.0-0/include -I/opt/irods-externals/libs3a30e55e8-0/include -stdlib=libc++ -lboost_system -lboost_filesystem -lcrypto -lz -lrt -ls3 -pthread -lc++abi -L/opt/irods-externals/boost1.67.0-0/lib/ -Wl,-rpath,/opt/irods-externals/clang-runtime6.0-0/lib -L/opt/irods-externals/libs3a30e55e8-0/lib -I/usr/include/irods -I/usr/include/libxml2 -Wl,-rpath,/opt/irods-externals/boost1.67.0-0/lib/ -Wl,-rpath,/opt/irods-externals/libs3a30e55e8-1/lib /opt/irods-externals/jansson2.7-0/lib/libjansson.a -lboost_thread
+DEBUG_INCL_DIRS=-I./include -I/home/jjames/github/libs3/build/include -I/opt/irods-externals/boost1.67.0-0/include -I/opt/irods-externals/jansson2.7-0/include -I/opt/irods-externals/json3.1.2-0/include -I/usr/include/irods -I/usr/include/libxml2
 
-s3_transport_test_debug: s3_transport_test.cpp s3_transport.hpp circular_buffer.hpp s3_multipart_shared_data.hpp s3_transport.cpp s3_transport_types.hpp s3_transport_util.hpp s3_transport_callbacks.hpp managed_shared_memory_object.hpp /home/jjames/github/libs3/build/lib/libs3.so.2
-	/opt/irods-externals/clang6.0-0/bin/clang++ s3_transport_test.cpp s3_transport.cpp -g -o s3_transport_test_debug -std=c++17 -I/opt/irods-externals/json3.1.2-0/include -I. -I/opt/irods-externals/jansson2.7-0/include -I/opt/irods-externals/boost1.67.0-0/include -I/home/jjames/github/libs3/build/include -stdlib=libc++ -lboost_system -lboost_filesystem -lcrypto -lz -lrt -ls3 -pthread -lc++abi -L/opt/irods-externals/boost1.67.0-0/lib/ -Wl,-rpath,/opt/irods-externals/clang-runtime6.0-0/lib -L/home/jjames/github/libs3/build/lib -I/usr/include/irods -I/usr/include/libxml2 -Wl,-rpath,/opt/irods-externals/boost1.67.0-0/lib/ -Wl,-rpath,/home/jjames/github/libs3/build/lib /opt/irods-externals/jansson2.7-0/lib/libjansson.a -lboost_thread -lcurl -lxml2
+INCL_DEPS=include/circular_buffer.hpp include/managed_shared_memory_object.hpp include/s3_transport_callbacks.hpp include/s3_transport_types.hpp include/lock_and_wait_strategy.hpp include/s3_multipart_shared_data.hpp include/s3_transport.hpp include/s3_transport_util.hpp
 
-read_shared_memory: read_shared_memory.cpp s3_multipart_shared_data.hpp managed_shared_memory_object.hpp s3_transport_util.hpp
-	/opt/irods-externals/clang6.0-0/bin/clang++ read_shared_memory.cpp s3_transport.cpp -g -o read_shared_memory -std=c++17 -I/opt/irods-externals/json3.1.2-0/include -I. -I/opt/irods-externals/jansson2.7-0/include -I/opt/irods-externals/boost1.67.0-0/include -I/home/jjames/github/libs3/build/include -stdlib=libc++ -lboost_system -lboost_filesystem -lcrypto -lz -lrt -ls3 -pthread -lc++abi -L/opt/irods-externals/boost1.67.0-0/lib/ -Wl,-rpath,/opt/irods-externals/clang-runtime6.0-0/lib -L/home/jjames/github/libs3/build/lib -I/usr/include/irods -I/usr/include/libxml2 -Wl,-rpath,/opt/irods-externals/boost1.67.0-0/lib/ -Wl,-rpath,/home/jjames/github/libs3/build/lib /opt/irods-externals/jansson2.7-0/lib/libjansson.a -lboost_thread -lcurl -lxml2
+LINK_LIBS=-L/opt/irods-externals/boost1.67.0-0/lib -L/opt/irods-externals/libs3a30e55e8-0/lib
+DEBUG_LINK_LIBS=-L/home/jjames/github/libs3/build/lib -L/opt/irods-externals/boost1.67.0-0/lib
+RPATHS=-Wl,-rpath,/opt/irods-externals/boost1.67.0-0/lib/ -Wl,-rpath,/opt/irods-externals/clang-runtime6.0-0/lib -Wl,-rpath,/opt/irods-externals/libs3a30e55e8-1/lib
+DEBUG_RPATHS=-Wl,-rpath,/home/jjames/github/libs3/build/lib -Wl,-rpath,/opt/irods-externals/boost1.67.0-0/lib/ -Wl,-rpath,/opt/irods-externals/clang-runtime6.0-0/lib
+
+
+
+SRC_DEPS=src/s3_transport.cpp
+
+COMPILER=/opt/irods-externals/clang6.0-0/bin/clang++
+
+s3_transport_test: s3_transport_test.cpp $(SRC_DEPS) $(INCL_DEPS)
+	$(COMPILER) $< $(SRC_DEPS) -std=c++17 -g -o $@ $(INCL_DIRS) $(LINK_LIBS) $(RPATHS) -stdlib=libc++ -lboost_system -lboost_filesystem -lcrypto -lz -lrt -ls3 -pthread -lc++abi /opt/irods-externals/jansson2.7-0/lib/libjansson.a -lboost_thread
+
+s3_transport_test_debug: s3_transport_test.cpp $(SRC_DEPS) $(INCL_DEPS)
+	$(COMPILER) $< $(SRC_DEPS) -std=c++17 -g -o $@ $(DEBUG_INCL_DIRS) $(DEBUG_LINK_LIBS) $(DEBUG_RPATHS) -stdlib=libc++ -lboost_system -lboost_filesystem -lcrypto -lz -lrt -ls3 -pthread -lc++abi /opt/irods-externals/jansson2.7-0/lib/libjansson.a -lboost_thread -lcurl -lxml2
+
+read_shared_memory: read_shared_memory.cpp $(SRC_DEPS) $(INCL_DEPS)
+	$(COMPILER) $< $(SRC_DEPS) -std=c++17 -g -o $@ --std=c++17 $(INCL_DIRS) $(LINK_LIBS) $(RPATHS) -stdlib=libc++ -lboost_system -lboost_filesystem -lcrypto -lz -lrt -ls3 -pthread -lc++abi /opt/irods-externals/jansson2.7-0/lib/libjansson.a -lboost_thread
 
