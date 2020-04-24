@@ -102,13 +102,11 @@ namespace irods::experimental::io::s3_transport
 
             virtual ~callback_for_read_from_s3_base() {};
 
+            libs3_types::bucket_context& saved_bucket_context; /* To enable more detailed error messages */
             uint64_t                     offset;       /* For multiple upload */
             uint64_t                     content_length;
-            uint64_t                     bytes_read_from_s3;
-            libs3_types::status          status;
-            libs3_types::bucket_context& saved_bucket_context; /* To enable more detailed error messages */
-            bool                         debug_flag;
             int                          thread_identifier;
+            uint64_t                     bytes_read_from_s3;
             std::string                  shmem_key;
             time_t                       shared_memory_timeout_in_seconds;
 
@@ -116,6 +114,8 @@ namespace irods::experimental::io::s3_transport
             // so that we know the process didn't die and leave shared memory corrupted
             int                          callback_counter;
 
+            libs3_types::status          status;
+            bool                         debug_flag;
     };
 
     template <typename buffer_type>
@@ -131,6 +131,7 @@ namespace irods::experimental::io::s3_transport
             libs3_types::status callback_implementation(int libs3_buffer_size,
                                                         const libs3_types::char_type *libs3_buffer)
             {
+                assert(libs3_buffer_size >= 0);
 
                 if (!cache_fstream.is_open()) {
                     cache_fstream.open(filename.c_str(), std::ios_base::out);
@@ -195,10 +196,11 @@ namespace irods::experimental::io::s3_transport
             libs3_types::status callback_implementation(int libs3_buffer_size,
                                                         const libs3_types::char_type *libs3_buffer)
             {
+                assert(libs3_buffer_size >= 0);
+
                 // writing to buffer
 
-                // TODO type?
-                auto bytes_to_write = this->offset + libs3_buffer_size > output_buffer_size
+                uint64_t bytes_to_write = this->offset + libs3_buffer_size > output_buffer_size
                     ? output_buffer_size - this->offset
                     : libs3_buffer_size;
 
@@ -207,7 +209,7 @@ namespace irods::experimental::io::s3_transport
                 this->offset += bytes_to_write;
                 this->bytes_read_from_s3 += bytes_to_write;
 
-                return ((bytes_to_write < static_cast<ssize_t>(libs3_buffer_size)) ?
+                return ((bytes_to_write < static_cast<uint64_t>(libs3_buffer_size)) ?
                         S3StatusAbortedByCallback : libs3_types::status_ok);
 
             }
@@ -252,17 +254,18 @@ namespace irods::experimental::io::s3_transport
 
                 callback_for_write_to_s3_base(libs3_types::bucket_context& _saved_bucket_context,
                                               upload_manager& _manager)
-                    : saved_bucket_context{_saved_bucket_context}
-                    , manager{_manager}
-                    , offset{0}
-                    , content_length{0}
-                    , enable_md5{false}
+                    : enable_md5{false}
                     , server_encrypt{false}
                     , thread_identifier{0}
-                    , debug_flag{false}
                     , object_key{}
                     , shmem_key{}
                     , shared_memory_timeout_in_seconds{constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS}
+                    , offset{0}
+                    , content_length{0}
+                    , saved_bucket_context{_saved_bucket_context}
+                    , debug_flag{false}
+                    , manager{_manager}
+                    , bytes_written{0}
                     , callback_counter{0}
                 {}
 
@@ -314,7 +317,6 @@ namespace irods::experimental::io::s3_transport
 
                 virtual ~callback_for_write_to_s3_base() {};
 
-                //std::reference_wrapper<upload_manager> manager;
                 libs3_types::status          status;
                 bool                         enable_md5;
                 bool                         server_encrypt;
@@ -351,6 +353,8 @@ namespace irods::experimental::io::s3_transport
                                             libs3_types::buffer_type libs3_buffer)
                 {
 
+                    assert(libs3_buffer_size >= 0);
+
                     if (!cache_fstream.is_open()) {
                         cache_fstream.open(filename.c_str(), std::ios_base::in);
                     }
@@ -362,9 +366,9 @@ namespace irods::experimental::io::s3_transport
                     }
 
                     // writing cache file to s3 buffer
-                    auto length_to_read_from_cache = this->content_length - this->bytes_written
-                        > libs3_buffer_size
-                        ? libs3_buffer_size
+                    uint64_t length_to_read_from_cache = this->content_length - this->bytes_written
+                        > static_cast<uint64_t>(libs3_buffer_size)
+                        ? static_cast<uint64_t>(libs3_buffer_size)
                         : this->content_length - this->bytes_written;
 
                     cache_fstream.seekg(this->offset);
@@ -423,6 +427,8 @@ namespace irods::experimental::io::s3_transport
                                             libs3_types::buffer_type libs3_buffer)
                 {
 
+                    assert(libs3_buffer_size >= 0);
+
                     // if we've already written the expected number of bytes, just return 0 which will
                     // trigger the completion
                     if (bytes_written >= this->content_length) {
@@ -451,10 +457,10 @@ namespace irods::experimental::io::s3_transport
 
                     auto remaining_transport_buffer_size = buffer.size() - this->offset;
 
-                    bool libs3_buffer_larger_than_remaining_transport_buffer = libs3_buffer_size
+                    bool libs3_buffer_larger_than_remaining_transport_buffer = static_cast<uint64_t>(libs3_buffer_size)
                         > remaining_transport_buffer_size;
 
-                    auto length = libs3_buffer_larger_than_remaining_transport_buffer
+                    uint64_t length = libs3_buffer_larger_than_remaining_transport_buffer
                         ? remaining_transport_buffer_size
                         : libs3_buffer_size;
 
@@ -520,18 +526,19 @@ namespace irods::experimental::io::s3_transport
 
                 callback_for_write_to_s3_base(libs3_types::bucket_context& _saved_bucket_context,
                                               upload_manager& _manager)
-                    : saved_bucket_context{_saved_bucket_context}
-                    , manager{_manager}
+                    : enable_md5{false}
+                    , server_encrypt{false}
+                    , thread_identifier{0}
+                    , shared_memory_timeout_in_seconds{constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS}
+                    , object_key{}
+                    , shmem_key{}
                     , sequence{0}
                     , offset{0}
                     , content_length{0}
-                    , enable_md5{false}
-                    , server_encrypt{false}
-                    , thread_identifier{0}
+                    , saved_bucket_context{_saved_bucket_context}
                     , debug_flag{false}
-                    , object_key{}
-                    , shmem_key{}
-                    , shared_memory_timeout_in_seconds{constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS}
+                    , manager{_manager}
+                    , bytes_written{0}
                     , callback_counter{0}
                 {}
 
@@ -576,8 +583,6 @@ namespace irods::experimental::io::s3_transport
                     using named_shared_memory_object =
                         irods::experimental::interprocess::shared_memory::named_shared_memory_object
                         <shared_data::multipart_shared_data>;
-
-                    const auto& object_key = callback_for_write_to_s3_base_data->object_key;
 
                     auto shmem_key =  callback_for_write_to_s3_base_data->shmem_key;
                     auto shared_memory_timeout_in_seconds =
@@ -636,7 +641,7 @@ namespace irods::experimental::io::s3_transport
                 std::string                  object_key;
                 std::string                  shmem_key;
 
-                int                          sequence;
+                unsigned long                sequence;
                 uint64_t                     offset;       // For multiple upload
                 uint64_t                     content_length;
                 libs3_types::bucket_context& saved_bucket_context; // To enable more detailed error messages
@@ -668,6 +673,8 @@ namespace irods::experimental::io::s3_transport
                                             libs3_types::buffer_type libs3_buffer)
                 {
 
+                    assert(libs3_buffer_size >= 0);
+
                     if (!cache_fstream.is_open()) {
                         cache_fstream.open(filename.c_str(), std::ios_base::in);
                     }
@@ -679,9 +686,9 @@ namespace irods::experimental::io::s3_transport
                     }
 
                     // writing cache file to s3 buffer
-                    auto length_to_read_from_cache = this->content_length - this->bytes_written
-                        > libs3_buffer_size
-                        ? libs3_buffer_size
+                    uint64_t length_to_read_from_cache = this->content_length - this->bytes_written
+                        > static_cast<uint64_t>(libs3_buffer_size)
+                        ? static_cast<uint64_t>(libs3_buffer_size)
                         : this->content_length - this->bytes_written;
 
                     cache_fstream.seekg(this->offset);
@@ -741,6 +748,8 @@ namespace irods::experimental::io::s3_transport
                                             libs3_types::buffer_type libs3_buffer)
                 {
 
+                    assert(libs3_buffer_size >= 0);
+
                     // if we've already written the expected number of bytes, just return 0 which will
                     // trigger the completion
                     if (bytes_written >= this->content_length) {
@@ -771,10 +780,10 @@ namespace irods::experimental::io::s3_transport
 
                     auto remaining_transport_buffer_size = buffer.size() - this->offset;
 
-                    bool libs3_buffer_larger_than_remaining_transport_buffer = libs3_buffer_size
+                    bool libs3_buffer_larger_than_remaining_transport_buffer = static_cast<unsigned long>(libs3_buffer_size)
                         > remaining_transport_buffer_size;
 
-                    auto length = libs3_buffer_larger_than_remaining_transport_buffer
+                    uint64_t length = libs3_buffer_larger_than_remaining_transport_buffer
                         ? remaining_transport_buffer_size
                         : libs3_buffer_size;
 

@@ -1,4 +1,4 @@
-#include "include/s3_transport.hpp"
+#include "s3_transport.hpp"
 #include <filesystem/filesystem.hpp>
 #include <dstream.hpp>
 #include <mutex>
@@ -7,6 +7,7 @@
 #include <fstream>
 #include <thread>
 #include <chrono>
+#include <algorithm>
 #include <sys/wait.h>
 
 const long transfer_buffer_size_for_parallel_transfer_in_megabytes = 4;
@@ -466,10 +467,16 @@ void upload_part(int thread_number,
 
     ds1.seekp(start);
 
-    // doing two writes here just to test that that works
+    // doing multiple writes of 1MiB here just to test that that works
+    /*const uint64_t max_write_size = 512*1024*1024;
+    uint64_t write_offset = 0;
+    while (write_offset < current_buffer_size) {
+        uint64_t write_size = std::min(max_write_size, current_buffer_size - write_offset);
+        ds1.write(current_buffer + write_offset, write_size);
+        write_offset += write_size;
+    }*/
+
     ds1.write(current_buffer, current_buffer_size);
-    //ds1.write(current_buffer, 100);
-    //ds1.write(current_buffer+100, current_buffer_size-100);
 
     printf("WRITE DONE FOR %d\n", thread_number);
 

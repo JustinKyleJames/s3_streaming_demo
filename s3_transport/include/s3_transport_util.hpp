@@ -89,9 +89,9 @@ namespace irods::experimental::io::s3_transport
     {
         upload_manager(libs3_types::bucket_context& _saved_bucket_context)
             : saved_bucket_context{_saved_bucket_context}
+            , xml{""}
             , remaining{0}
             , offset{0}
-            , xml{""}
         {
         }
 
@@ -115,11 +115,11 @@ namespace irods::experimental::io::s3_transport
     {
         data_for_write_callback(libs3_types::bucket_context& _saved_bucket_context,
                                 irods::experimental::circular_buffer<upload_page<buffer_type>>& _circular_buffer)
-            : saved_bucket_context{_saved_bucket_context}
+            : offset{0}
             , circular_buffer{_circular_buffer}
             , content_length{0}
-            , offset{0}
             , bytes_written{0}
+            , saved_bucket_context{_saved_bucket_context}
         {}
 
         buffer_type         buffer;

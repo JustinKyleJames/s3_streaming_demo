@@ -75,10 +75,10 @@ namespace irods::experimental::io::s3_transport
         {}
 
         uint64_t     object_size;
-        int          number_of_transfer_threads; // only used when doing full file upload/download via cache
-                                                       // otherwise it is controlled by iRODS
+        unsigned int number_of_transfer_threads; // only used when doing full file upload/download via cache
+                                                 // otherwise it is controlled by iRODS
         uint64_t     part_size;                  // only used when doing a multipart upload
-        int          retry_count_limit;
+        unsigned int retry_count_limit;
         int          retry_wait_seconds;
         std::string  hostname;
         std::string  bucket_name;
@@ -318,7 +318,7 @@ namespace irods::experimental::io::s3_transport
                 // do close processing if # files open = 0
                 //  - for multipart upload send the complete message
                 //  - if using a cache file flush the cache and delete cache file
-                last_file_to_close = shm_obj.atomic_exec([this](auto& data) {
+                last_file_to_close = shm_obj.atomic_exec([](auto& data) {
                     bool return_value = (data.file_open_counter == 1);
                     if (data.file_open_counter > 0) {
                         data.file_open_counter -= 1;
@@ -351,7 +351,7 @@ namespace irods::experimental::io::s3_transport
 
                     } else {
 
-                        return_value = shm_obj.atomic_exec( [this, &shm_obj, open_flags](auto& data) {
+                        return_value = shm_obj.atomic_exec( [this, open_flags](auto& data) {
 
                             if ( is_full_multipart_upload(open_flags) ) {
                                 if (error_codes::SUCCESS != complete_multipart_upload()) {
@@ -407,7 +407,6 @@ namespace irods::experimental::io::s3_transport
                 // calculate the new size of the file
                 auto current_position = cache_fstream_.tellp();
                 cache_fstream_.seekp(0, std::ios_base::end);
-                auto new_size = cache_fstream_.tellp();
 
                 // seek back to current position
                 cache_fstream_.seekp(current_position, std::ios_base::beg);
@@ -421,7 +420,7 @@ namespace irods::experimental::io::s3_transport
             // We must copy the buffer because it will persist after send returns.
             // TODO scope of copied_buffer
             buffer_type copied_buffer(_buffer, _buffer + _buffer_size);
-            circular_buffer_.push_back({copied_buffer});
+            circular_buffer_.push_back({copied_buffer, false});
 
             if (config_.debug_flag) {
                 printf("%s:%d (%s) [[%d]] wrote buffer of size %ld\n",
@@ -618,16 +617,15 @@ namespace irods::experimental::io::s3_transport
 
                 // each part must be at least 5MB in size
                 uint64_t minimum_part_size = 5 * 1024 * 1024;
-                int number_of_transfer_threads
+                unsigned int number_of_transfer_threads
                     = minimum_part_size * config_.number_of_transfer_threads < s3_object_size
                     ? config_.number_of_transfer_threads
                     : s3_object_size / minimum_part_size == 0 ? 1 : s3_object_size / minimum_part_size;
 
                 uint64_t part_size = s3_object_size / number_of_transfer_threads;
-                uint64_t start_microseconds = get_time_in_microseconds();
 
                 {
-                    irods::thread_pool threads{number_of_transfer_threads};
+                    irods::thread_pool threads{static_cast<int>(number_of_transfer_threads)};
 
                     for (unsigned int thr_id= 0; thr_id < number_of_transfer_threads; ++thr_id) {
 
@@ -709,7 +707,7 @@ namespace irods::experimental::io::s3_transport
             }
 
             ifs.seekg(0, std::ios_base::end);
-            off_t cache_file_size = ifs.tellg();
+            uint64_t cache_file_size = static_cast<uint64_t>(ifs.tellg());
             ifs.close();
 
             // each part must be at least 5MB in size
@@ -727,7 +725,7 @@ namespace irods::experimental::io::s3_transport
 
                 irods::thread_pool cache_flush_threads{number_of_transfer_threads};
 
-                for (unsigned int thr_id= 0; thr_id < number_of_transfer_threads; ++thr_id) {
+                for (int thr_id= 0; thr_id < number_of_transfer_threads; ++thr_id) {
 
                         irods::thread_pool::post(cache_flush_threads, [this, thr_id, part_size] () {
                                 // upload part and read your part from cache file
@@ -937,7 +935,7 @@ namespace irods::experimental::io::s3_transport
                 }
             }
 
-            auto file_open_counter = shm_obj.atomic_exec([this](auto& data) {
+            auto file_open_counter = shm_obj.atomic_exec([](auto& data) {
                     return ++(data.file_open_counter);
             });
 
@@ -1022,10 +1020,9 @@ namespace irods::experimental::io::s3_transport
             namespace bi = boost::interprocess;
             namespace types = shared_data::interprocess_types;
 
-            int cache_fd = -1;
-            int err_status = 0;
-            int retry_cnt    = 0;
-            bool enable_md5 = config_.enable_md5_flag;
+            //int cache_fd = -1;
+            unsigned int retry_cnt    = 0;
+            //bool enable_md5 = config_.enable_md5_flag;
             put_props_.useServerSideEncryption = config_.server_encrypt_flag;
             std::stringstream msg;
 
@@ -1180,10 +1177,8 @@ namespace irods::experimental::io::s3_transport
                                 msg.str().c_str() );
                     }
 
-                    int i;
+                    uint64_t i;
                     xml << "<CompleteMultipartUpload>\n";
-                    char_type buf[256];
-                    int n;
                     for ( i = 0; i < data.etags.size(); i++ ) {
                         xml << "<Part><PartNumber>";
                         xml << (i + 1);
@@ -1260,7 +1255,7 @@ namespace irods::experimental::io::s3_transport
 
             std::stringstream msg;
 
-            int retry_cnt = 0;
+            unsigned int retry_cnt = 0;
 
             if (0 > offset) {
                 offset = file_offset_;
@@ -1366,7 +1361,9 @@ namespace irods::experimental::io::s3_transport
 
         } // end s3_download_part_worker_routine
 
-        void s3_upload_part_worker_routine(bool read_from_cache = false, int part_number = 0, int part_size = 0)
+        void s3_upload_part_worker_routine(bool read_from_cache = false,
+                                           unsigned int part_number = 0,
+                                           unsigned int part_size = 0)
         {
 
             namespace bi = boost::interprocess;
@@ -1385,7 +1382,7 @@ namespace irods::experimental::io::s3_transport
                 return data.upload_id.c_str();
             });
 
-            int retry_cnt = 0;
+            unsigned int retry_cnt = 0;
 
             S3PutObjectHandler put_object_handler = {
                 {
@@ -1461,14 +1458,14 @@ namespace irods::experimental::io::s3_transport
                 // determine the sequence number from the offset, file size, and buffer size
                 // the last page might be larger so doing a little trick to handle that case (second term)
                 //  Note:  We bailed early if config_.part_size == 0
-                int sequence = (file_offset_ / config_.part_size) +
+                unsigned long sequence = (file_offset_ / config_.part_size) +
                     (file_offset_ % config_.part_size == 0 ? 0 : 1) + 1;
 
                 write_callback->sequence = sequence;
                 write_callback->content_length = config_.part_size;
 
                 // estimate the size and resize the etags vector
-                int number_of_parts = config_.object_size / config_.part_size;
+                unsigned long  number_of_parts = config_.object_size / config_.part_size;
                 number_of_parts = number_of_parts < sequence ? sequence : number_of_parts;
 
                 // resize the etags vector if necessary
@@ -1519,7 +1516,6 @@ namespace irods::experimental::io::s3_transport
                             msg.str().c_str() );
                 }
 
-                S3PutProperties putProps;
                 put_props_.md5 = nullptr;
                 //if ( partData.enable_md5 ) {
                 //    // jjames - not sure how to do MD5 piecewise
@@ -1528,10 +1524,9 @@ namespace irods::experimental::io::s3_transport
                 //    partData.put_object_data.content_length, resource_name );
                 //}
                 put_props_.expires = -1;
-                uint64_t start_microseconds = get_time_in_microseconds();
 
                 if (config_.debug_flag) {
-                    printf("%s:%d (%s) [[%d]] S3_upload_part (ctx, %s, props, handler, %d, "
+                    printf("%s:%d (%s) [[%d]] S3_upload_part (ctx, %s, props, handler, %lu, "
                            "uploadId, %lu, 0, partData)\n", __FILE__, __LINE__, __FUNCTION__, thread_identifier_,
                            object_key_.c_str(), write_callback->sequence,
                            write_callback->content_length);
@@ -1542,15 +1537,11 @@ namespace irods::experimental::io::s3_transport
                         write_callback->content_length, 0, write_callback.get());
 
                 if (config_.debug_flag) {
-                    printf("%s:%d (%s) [[%d]] S3_upload_part returned [part=%d][status=%s].\n",
+                    printf("%s:%d (%s) [[%d]] S3_upload_part returned [part=%lu][status=%s].\n",
                             __FILE__, __LINE__, __FUNCTION__, thread_identifier_, write_callback->sequence,
                             S3_get_status_name(write_callback->status));
                 }
 
-                uint64_t end_microseconds = get_time_in_microseconds();
-                //double bw = (mpu_data_[sequence-1].put_object_data.content_length /
-                //   (1024.0 * 1024.0)) /
-                //   ( (end_microseconds - start_microseconds) / 1000000.0 );
                 if (config_.debug_flag) {
                     std::stringstream msg;
                     msg << "Multipart:  -- END -- BW=";// << bw << " MB/s";
@@ -1578,7 +1569,7 @@ namespace irods::experimental::io::s3_transport
 
             std::shared_ptr<s3_upload::callback_for_write_to_s3_base<buffer_type>> write_callback;
 
-            int retry_cnt = 0;
+            unsigned int retry_cnt = 0;
 
             do {
 
@@ -1603,9 +1594,6 @@ namespace irods::experimental::io::s3_transport
                         (write_callback.get());
 
                     write_callback_from_cache->set_and_open_cache_file(cache_file_path_);
-
-                    // get the object size from the cache file
-                    auto object_size = get_cache_file_size();
 
                     write_callback->content_length = get_cache_file_size();
                     write_callback->offset = 0;
@@ -1661,7 +1649,6 @@ namespace irods::experimental::io::s3_transport
                 //    partData.put_object_data.content_length, resource_name );
                 //}
                 put_props_.expires = -1;
-                uint64_t start_microseconds = get_time_in_microseconds();
 
                 if (config_.debug_flag) {
                     printf("%s:%d (%s) [[%d]] S3_put_object(ctx, %s, "
@@ -1680,8 +1667,6 @@ namespace irods::experimental::io::s3_transport
                             S3_get_status_name(write_callback->status));
                 }
 
-                uint64_t end_microseconds = get_time_in_microseconds();
-
                 if (write_callback->status != libs3_types::status_ok) s3_sleep( config_.retry_wait_seconds, 0 );
             } while ((write_callback->status != libs3_types::status_ok) && S3_status_is_retryable(write_callback->status) &&
                     (++retry_cnt < config_.retry_count_limit));
@@ -1697,35 +1682,39 @@ namespace irods::experimental::io::s3_transport
         const config&                config_;
         int                          fd_;
         nlohmann::json               fd_info_;
-        std::string                  object_key_;
-        std::string                  shmem_key_;
-        libs3_types::bucket_context  bucket_context_;
-        upload_manager               upload_manager_;
-        S3SignatureVersion           s3_signature_version_;
 
         bool                         call_s3_upload_part_flag_;
         bool                         call_s3_download_part_flag_;
-        S3PutProperties              put_props_;
+
+        std::unique_ptr<std::thread> begin_part_upload_thread_ptr_;
 
         irods::experimental::circular_buffer<upload_page<buffer_type>>
                                      circular_buffer_;
-        std::unique_ptr<std::thread> begin_part_upload_thread_ptr_;
 
         std::ios_base::openmode      mode_;
         off_t                        file_offset_;
-
-        std::string                  cache_file_path_;
-        std::fstream                 cache_fstream_;
-        int                          cache_fd_;
 
         // operational modes based on input flags
         bool                         download_to_cache_;
         bool                         use_cache_;
         bool                         object_must_exist_;
-        bool                         critical_error_encountered_;
 
         // just for debugging purposes
         int                          thread_identifier_;
+
+        upload_manager               upload_manager_;
+        S3PutProperties              put_props_;
+        libs3_types::bucket_context  bucket_context_;
+
+        bool                         critical_error_encountered_;
+
+        std::string                  object_key_;
+        std::string                  shmem_key_;
+        S3SignatureVersion           s3_signature_version_;
+
+        std::string                  cache_file_path_;
+        std::fstream                 cache_fstream_;
+        int                          cache_fd_;
 
         inline static int            file_descriptor_counter_ = minimum_valid_file_descriptor;
 
