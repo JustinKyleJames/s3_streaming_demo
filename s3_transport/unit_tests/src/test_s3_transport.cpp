@@ -89,7 +89,7 @@ void upload_part(const char* const hostname,
     s3_config.access_key = access_key;
     s3_config.secret_access_key = secret_access_key;
     s3_config.thread_identifier = thread_number;
-    s3_config.debug_flag = true;
+    s3_config.debug_flag = false;
     s3_config.multipart_flag = true;
     s3_config.shared_memory_timeout_in_seconds = 60;
 
@@ -100,8 +100,8 @@ void upload_part(const char* const hostname,
 
     ds1.seekp(start);
 
-    // doing multiple writes of 1MiB here just to test that that works
-    const uint64_t max_write_size = 200*1024*1024;
+    // doing multiple writes of 10MiB here just to test that that works
+    const uint64_t max_write_size = 10*1024*1024;
     uint64_t write_offset = 0;
     while (write_offset < current_buffer_size) {
         uint64_t write_size = std::min(max_write_size, current_buffer_size - write_offset);

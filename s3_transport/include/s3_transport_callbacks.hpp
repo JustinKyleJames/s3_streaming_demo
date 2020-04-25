@@ -431,7 +431,7 @@ namespace irods::experimental::io::s3_transport
 
                     // if we've already written the expected number of bytes, just return 0 which will
                     // trigger the completion
-                    if (bytes_written >= this->content_length) {
+                    if (this->bytes_written >= this->content_length) {
                         return 0;
                     }
 
@@ -467,7 +467,7 @@ namespace irods::experimental::io::s3_transport
                     memcpy(libs3_buffer, buffer.data() + this->offset, length);
 
                     this->offset += length;
-                    bytes_written += length;
+                    this->bytes_written += length;
 
                     return length;
 
@@ -477,7 +477,6 @@ namespace irods::experimental::io::s3_transport
 
                 buffer_type buffer;
                 irods::experimental::circular_buffer<upload_page<buffer_type>>& circular_buffer;
-                uint64_t bytes_written;
 
         };
 
@@ -752,7 +751,7 @@ namespace irods::experimental::io::s3_transport
 
                     // if we've already written the expected number of bytes, just return 0 which will
                     // trigger the completion
-                    if (bytes_written >= this->content_length) {
+                    if (this->bytes_written >= this->content_length) {
                         return 0;
                     }
 
@@ -790,7 +789,7 @@ namespace irods::experimental::io::s3_transport
                     memcpy(libs3_buffer, buffer.data() + this->offset, length);
 
                     this->offset += length;
-                    bytes_written += length;
+                    this->bytes_written += length;
 
                     return length;
 
@@ -800,7 +799,6 @@ namespace irods::experimental::io::s3_transport
 
                 buffer_type buffer;
                 irods::experimental::circular_buffer<upload_page<buffer_type>>& circular_buffer;
-                uint64_t bytes_written;
 
         };
 

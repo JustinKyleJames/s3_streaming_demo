@@ -3,7 +3,7 @@
     "hostname" : "s3.amazonaws.com",
     "bucket_name": "justinkylejames1",
     "thread_count": 16,
-    "debug_flag": false,
+    "debug_flag": true,
     "circular_buffer_capacity": 10,
     "use_multiprocess_flag": false,
     "use_multipart_flag": true
