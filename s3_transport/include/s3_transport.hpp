@@ -399,6 +399,9 @@ namespace irods::experimental::io::s3_transport
         std::streamsize send(const char_type* _buffer,
                              std::streamsize _buffer_size) override
         {
+            /*if (!(mode_ && std::ios_base::out)) {
+                return 0;
+            }*/
 
             if (use_cache_) {
                 auto position_before_write = cache_fstream_.tellp();
@@ -455,7 +458,6 @@ namespace irods::experimental::io::s3_transport
             }
 
             if (use_cache_) {
-
                 // we are using a cache file so just seek on it,
                 cache_fstream_.seekg(_offset, _dir);
                 return cache_fstream_.tellg();
@@ -974,7 +976,7 @@ namespace irods::experimental::io::s3_transport
                     bf::path cache_file =  bf::path(config_.cache_directory) / bf::path(object_key_ + "-cache");
                     cache_file_path_ = cache_file.string();
                     cache_fstream_.open(cache_file_path_.c_str(),
-                            std::ios_base::in | std::ios_base::out | std::ios_base::app);
+                            std::ios_base::in | std::ios_base::out | _mode);
 
                     if (!cache_fstream_) {
                         fprintf(stderr, "%s:%d (%s) [[%d]] Failed to open cache file.\n",

@@ -51,8 +51,6 @@ namespace irods::experimental::io::s3_transport::shared_data
 
         void reset_fields()
         {
-            printf("reset fields ran\n");
-            file_open_counter = 0;
             upload_id = "";
             etags.clear();
             last_error_code = error_codes::SUCCESS;
