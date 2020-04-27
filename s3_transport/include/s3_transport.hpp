@@ -171,12 +171,12 @@ namespace irods::experimental::io::s3_transport
                 bucket_context_.protocol    = S3ProtocolHTTPS;
             }
 
-            if (boost::iequals(_config.s3_sts_date_str, "date")) {
-                bucket_context_.stsDate     = S3STSDateOnly;
+            if (boost::iequals(_config.s3_sts_date_str, "amz")) {
+                bucket_context_.stsDate     = S3STSAmzOnly;
             } else if (boost::iequals(_config.s3_sts_date_str, "both")) {
                 bucket_context_.stsDate     = S3STSAmzAndDate;
             } else {
-                bucket_context_.stsDate     = S3STSAmzOnly;
+                bucket_context_.stsDate     = S3STSDateOnly;
             }
 
             bucket_context_.uriStyle        = S3UriStylePath;
@@ -421,7 +421,6 @@ namespace irods::experimental::io::s3_transport
             // Not using cache.
             // Put the buffer on the circular buffer.
             // We must copy the buffer because it will persist after send returns.
-            // TODO scope of copied_buffer
             buffer_type copied_buffer(_buffer, _buffer + _buffer_size);
             circular_buffer_.push_back({copied_buffer, false});
 
@@ -578,7 +577,8 @@ namespace irods::experimental::io::s3_transport
             bf::path cache_file =  bf::path(config_.cache_directory) / bf::path(object_key_ + "-cache");
             bf::path parent_path = cache_file.parent_path();
             try {
-                boost::filesystem::create_directory(parent_path);
+                // TODO if parent's parent doesn't exist this fails
+                boost::filesystem::create_directories(parent_path);
             } catch (boost::filesystem::filesystem_error& e) {
                 fprintf(stderr, "%s:%d (%s) [[%d]] Could not download file to cache.  %s\n",
                         __FILE__, __LINE__, __FUNCTION__, thread_identifier_, e.what());
