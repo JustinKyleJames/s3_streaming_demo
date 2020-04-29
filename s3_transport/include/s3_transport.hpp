@@ -261,7 +261,7 @@ namespace irods::experimental::io::s3_transport
         }
 
 
-        bool close(const on_close_success* _on_close_success = nullptr) override
+        bool close() override
         {
 
             namespace bi = boost::interprocess;
@@ -497,25 +497,6 @@ namespace irods::experimental::io::s3_transport
         int file_descriptor() const noexcept override
         {
             return fd_;
-        }
-
-        std::string resource_name() const override
-        {
-            //return fd_info_["data_object_info"]["resource_name"].template get<std::string>();
-            return "";
-        }
-
-        std::string resource_hierarchy() const override
-        {
-            //return fd_info_["data_object_info"]["resource_hierarchy"].template get<std::string>();
-            return "";
-        }
-
-        int replica_number() const override
-        {
-
-            //return fd_info_["data_object_info"]["replica_number"].template get<int>();
-            return 0;
         }
 
     private:
