@@ -193,7 +193,7 @@ namespace irods::experimental::io::s3_transport
 
             // if using cache, go ahead and close the fstream
             if (use_cache_) {
-                if (cache_fstream_.is_open()) {
+                if (cache_fstream_) {
                     cache_fstream_.close();
                 }
             }
@@ -488,7 +488,7 @@ namespace irods::experimental::io::s3_transport
         bool is_open() const noexcept override
         {
             if (use_cache_) {
-                return cache_fstream_.is_open();
+                return cache_fstream_ && cache_fstream_.is_open();
             } else {
                 return fd_ >= minimum_valid_file_descriptor;
             }
@@ -523,11 +523,16 @@ namespace irods::experimental::io::s3_transport
 
         auto get_cache_file_size() -> uint64_t
         {
-            auto current_position = cache_fstream_.tellp();
-            cache_fstream_.seekp(0, std::ios_base::end);
-            auto cache_file_size = cache_fstream_.tellp();
-            cache_fstream_.seekp(current_position, std::ios_base::beg);
-            return cache_file_size;
+            std::fstream fs(cache_file_path_);
+            if (!fs || !fs.is_open()) {
+                fprintf(stderr, "%s:%d (%s) [[%d]] could not open cache file to get size\n",
+                        __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
+                return 0;
+            }
+
+            fs.seekp(0, std::ios_base::end);
+            auto cache_file_size = fs.tellp();
+            return static_cast<int64_t>(cache_file_size) < 0 ? 0 : static_cast<uint64_t>(cache_file_size);
         }
 
         bool begin_multipart_upload(named_shared_memory_object& shm_obj, const int& file_open_counter)
@@ -702,7 +707,7 @@ namespace irods::experimental::io::s3_transport
             // calculate the part size
             std::ifstream ifs;
             ifs.open(cache_file_path_.c_str(), std::ios::out);
-            if (!ifs) {
+            if (!ifs || !ifs.is_open()) {
                 fprintf(stderr, "%s:%d (%s) [[%d]] Failed to open cache file.\n",
                         __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
                 return error_codes::UPLOAD_FILE_ERROR;
@@ -745,7 +750,7 @@ namespace irods::experimental::io::s3_transport
             }
 
             // remove cache file
-            std::remove(cache_file_path_.c_str());
+            //std::remove(cache_file_path_.c_str());
 
             // set cache file download flag to NOT_STARTED
             shm_obj.atomic_exec([](auto& data) {
@@ -927,6 +932,9 @@ namespace irods::experimental::io::s3_transport
             });
             bi::scoped_lock file_open_lock(*file_open_close_mutex);
 
+            auto file_open_counter = shm_obj.atomic_exec([](auto& data) {
+                    return ++(data.file_open_counter);
+            });
 
             if (object_exists && download_to_cache_) {
 
@@ -936,10 +944,6 @@ namespace irods::experimental::io::s3_transport
                     return false;
                 }
             }
-
-            auto file_open_counter = shm_obj.atomic_exec([](auto& data) {
-                    return ++(data.file_open_counter);
-            });
 
             if ( is_full_upload(open_flags) ) {
 
@@ -971,14 +975,24 @@ namespace irods::experimental::io::s3_transport
                 // using cache, open the cache file for subsequent reads/writes
                 // use the mode that was passed in
 
-                if (!cache_fstream_.is_open()) {
+                if (!cache_fstream_ || !cache_fstream_.is_open()) {
 
                     bf::path cache_file =  bf::path(config_.cache_directory) / bf::path(object_key_ + "-cache");
+                    bf::path parent_path = cache_file.parent_path();
+
+                    try {
+                        boost::filesystem::create_directories(parent_path);
+                    } catch (boost::filesystem::filesystem_error& e) {
+                        fprintf(stderr, "%s:%d (%s) [[%d]] Could not parent directories for cache file.  %s\n",
+                                __FILE__, __LINE__, __FUNCTION__, thread_identifier_, e.what());
+                        return false;
+                    }
+
                     cache_file_path_ = cache_file.string();
                     cache_fstream_.open(cache_file_path_.c_str(),
                             std::ios_base::in | std::ios_base::out | _mode);
 
-                    if (!cache_fstream_) {
+                    if (!cache_fstream_ || !cache_fstream_.is_open()) {
                         fprintf(stderr, "%s:%d (%s) [[%d]] Failed to open cache file.\n",
                                 __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
                         critical_error_encountered_ = true;
