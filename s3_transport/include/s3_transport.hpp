@@ -128,7 +128,7 @@ namespace irods::experimental::io::s3_transport
 
     public:
 
-        explicit s3_transport(const config& _config)
+        explicit s3_transport(const config _config)
 
             : transport<CharT>{}
             , config_{_config}
@@ -1676,7 +1676,7 @@ namespace irods::experimental::io::s3_transport
 
         } // end s3_upload_file
 
-        const config&                config_;
+        const config                 config_;
         int                          fd_;
         nlohmann::json               fd_info_;
 
