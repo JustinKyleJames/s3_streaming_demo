@@ -393,7 +393,14 @@ namespace irods::experimental::io::s3_transport
 
             // Not using cache.
             // just get what is asked for
-            return s3_download_part_worker_routine(_buffer, _buffer_size);
+            std::streamsize length = s3_download_part_worker_routine(_buffer, _buffer_size);
+
+            // if we are not using cache file, update the read/write pointer
+            if (!use_cache_) {
+                seekpos(length, std::ios_base::cur);
+            }
+
+            return length;
         }
 
         std::streamsize send(const char_type* _buffer,
@@ -1057,7 +1064,6 @@ namespace irods::experimental::io::s3_transport
                         s3_multipart_upload::initialization_callback::on_response };
 
                 do {
-                    print_bucket_context(bucket_context_);
                     if (config_.debug_flag) {
                         printf("%s:%d (%s) [[%d]] call S3_initiate_multipart [object_key=%s]\n",
                                 __FILE__, __LINE__, __FUNCTION__, thread_identifier_, object_key_.c_str());
@@ -1310,7 +1316,6 @@ namespace irods::experimental::io::s3_transport
                 }
 
                 uint64_t start_microseconds = get_time_in_microseconds();
-                print_bucket_context(bucket_context_);
                 S3_get_object( &bucket_context_, object_key_.c_str(), NULL,
                         offset, read_callback->content_length, 0,
                         &get_object_handler, read_callback.get() );

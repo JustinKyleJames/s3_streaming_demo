@@ -296,10 +296,20 @@ void download_part(const char* const hostname,
     REQUIRE(ds1.is_open());
 
     ds1.seekg(start);
-    ds1.read(current_buffer, current_buffer_size);
-
     ofs.seekp(start, std::ios::beg);
-    ofs.write(current_buffer, current_buffer_size);
+
+    size_t offset = 0;
+    size_t max_read_length = 1024*1024;
+
+    // break read up into parts like iRODS
+    while (offset < current_buffer_size) {
+        size_t read_size = offset + max_read_length < current_buffer_size
+            ? max_read_length
+            : current_buffer_size - offset;
+        ds1.read(current_buffer, read_size);
+        ofs.write(current_buffer, read_size);
+        offset += read_size;
+    }
     ofs.close();
 
     printf("READ DONE FOR %d\n", thread_number);
