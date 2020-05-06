@@ -105,7 +105,7 @@ namespace irods::experimental::io::s3_transport
             libs3_types::bucket_context& saved_bucket_context; /* To enable more detailed error messages */
             uint64_t                     offset;       /* For multiple upload */
             uint64_t                     content_length;
-            int                          thread_identifier;
+            unsigned int                 thread_identifier;
             uint64_t                     bytes_read_from_s3;
             std::string                  shmem_key;
             time_t                       shared_memory_timeout_in_seconds;
@@ -138,7 +138,7 @@ namespace irods::experimental::io::s3_transport
                 }
 
                 if (!cache_fstream) {
-                    fprintf(stderr, "%s:%d (%s) [[%d]] could not open cache file\n",
+                    fprintf(stderr, "%s:%d (%s) [[%u]] could not open cache file\n",
                             __FILE__, __LINE__, __FUNCTION__, this->thread_identifier);
                     return S3StatusAbortedByCallback;
                 }
@@ -169,7 +169,7 @@ namespace irods::experimental::io::s3_transport
                 filename = f;
                 cache_fstream.open(filename.c_str(), std::ios_base::out);
                 if (!cache_fstream) {
-                    fprintf(stderr, "%s:%d (%s) [[%d]] could not open cache file\n",
+                    fprintf(stderr, "%s:%d (%s) [[%u]] could not open cache file\n",
                             __FILE__, __LINE__, __FUNCTION__, this->thread_identifier);
                 }
             }
@@ -320,7 +320,7 @@ namespace irods::experimental::io::s3_transport
                 libs3_types::status          status;
                 bool                         enable_md5;
                 bool                         server_encrypt;
-                int                          thread_identifier;
+                unsigned int                 thread_identifier;
                 std::string                  object_key;
                 std::string                  shmem_key;
                 time_t                       shared_memory_timeout_in_seconds;
@@ -360,7 +360,7 @@ namespace irods::experimental::io::s3_transport
                     }
 
                     if (!cache_fstream) {
-                        fprintf(stderr, "%s:%d (%s) [[%d]] could not open cache file\n",
+                        fprintf(stderr, "%s:%d (%s) [[%u]] could not open cache file\n",
                                 __FILE__, __LINE__, __FUNCTION__, this->thread_identifier);
                         return S3StatusAbortedByCallback;
                     }
@@ -395,7 +395,7 @@ namespace irods::experimental::io::s3_transport
                     filename = f;
                     cache_fstream.open(filename.c_str(), std::ios_base::in);
                     if (!cache_fstream) {
-                        fprintf(stderr, "%s:%d (%s) [[%d]] could not open cache file\n",
+                        fprintf(stderr, "%s:%d (%s) [[%u]] could not open cache file\n",
                                 __FILE__, __LINE__, __FUNCTION__, this->thread_identifier);
                     }
                 }
@@ -442,12 +442,12 @@ namespace irods::experimental::io::s3_transport
 
                         // read the first page
                         if (this->debug_flag) {
-                            printf("%s:%d (%s) [[%d]] waiting to read\n", __FILE__, __LINE__, __FUNCTION__,
+                            printf("%s:%d (%s) [[%u]] waiting to read\n", __FILE__, __LINE__, __FUNCTION__,
                                     this->thread_identifier);
                         }
                         circular_buffer.pop_front(page);
                         if (this->debug_flag) {
-                            printf("%s:%d (%s) [[%d]] read page [buffer=%p][buffer_size=%lu][terminate_flag=%d]\n",
+                            printf("%s:%d (%s) [[%u]] read page [buffer=%p][buffer_size=%lu][terminate_flag=%d]\n",
                                     __FILE__, __LINE__, __FUNCTION__, this->thread_identifier, page.buffer.data(),
                                     page.buffer.size(), page.terminate_flag);
                         }
@@ -635,7 +635,7 @@ namespace irods::experimental::io::s3_transport
                 libs3_types::status          status;
                 bool                         enable_md5;
                 bool                         server_encrypt;
-                int                          thread_identifier;
+                unsigned int                 thread_identifier;
                 time_t                       shared_memory_timeout_in_seconds;
                 std::string                  object_key;
                 std::string                  shmem_key;
@@ -679,7 +679,7 @@ namespace irods::experimental::io::s3_transport
                     }
 
                     if (!cache_fstream) {
-                        fprintf(stderr, "%s:%d (%s) [[%d]] could not open cache file\n",
+                        fprintf(stderr, "%s:%d (%s) [[%u]] could not open cache file\n",
                                 __FILE__, __LINE__, __FUNCTION__, this->thread_identifier);
                         return 0;
                     }
@@ -715,7 +715,7 @@ namespace irods::experimental::io::s3_transport
                     filename = f;
                     cache_fstream.open(filename.c_str(), std::ios_base::in);
                     if (!cache_fstream) {
-                        fprintf(stderr, "%s:%d (%s) [[%d]] could not open cache file\n",
+                        fprintf(stderr, "%s:%d (%s) [[%u]] could not open cache file\n",
                                 __FILE__, __LINE__, __FUNCTION__, this->thread_identifier);
                     }
                 }
@@ -762,13 +762,13 @@ namespace irods::experimental::io::s3_transport
 
                         // read the first page
                         if (this->debug_flag) {
-                            printf("%s:%d (%s) [[%d]] waiting to read\n",
+                            printf("%s:%d (%s) [[%u]] waiting to read\n",
                                     __FILE__, __LINE__, __FUNCTION__,
                                     this->thread_identifier);
                         }
                         circular_buffer.pop_front(page);
                         if (this->debug_flag) {
-                            printf("%s:%d (%s) [[%d]] read page [buffer=%p][buffer_size=%lu]"
+                            printf("%s:%d (%s) [[%u]] read page [buffer=%p][buffer_size=%lu]"
                                     "[terminate_flag=%d]\n", __FILE__, __LINE__, __FUNCTION__,
                                     this->thread_identifier, page.buffer.data(),
                                     page.buffer.size(), page.terminate_flag);

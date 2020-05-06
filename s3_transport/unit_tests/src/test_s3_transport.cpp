@@ -510,21 +510,22 @@ void do_upload_thread(const std::string& bucket_name,
 
     upload_stage_and_cleanup(bucket_name, filename, object_prefix);
 
-    std::thread *writer_threads = new std::thread[thread_count];
+    irods::thread_pool writer_threads{thread_count};
 
     for (int thread_number = 0; thread_number <  thread_count; ++thread_number) {
 
-        writer_threads[thread_number] = std::thread(upload_part, hostname.c_str(),
-                    bucket_name.c_str(), access_key.c_str(), secret_access_key.c_str(),
+        irods::thread_pool::post(writer_threads, [bucket_name, access_key,
+                secret_access_key, filename, object_prefix, thread_count, thread_number,
+                s3_signature_version_str, s3_protocol_str, s3_sts_date_str] () {
+
+
+            upload_part(hostname.c_str(), bucket_name.c_str(), access_key.c_str(), secret_access_key.c_str(),
                     filename.c_str(), object_prefix.c_str(), thread_count, thread_number, true, s3_signature_version_str,
                     s3_protocol_str, s3_sts_date_str, false);
+        });
     }
 
-    for (int thread_number = 0; thread_number < thread_count; ++thread_number) {
-        writer_threads[thread_number].join();
-    }
-
-    delete[] writer_threads;
+    writer_threads.join();
 
     check_upload_results(bucket_name, filename, object_prefix);
 }
@@ -564,20 +565,21 @@ void do_download_thread(const std::string& bucket_name,
 
     download_stage_and_cleanup(bucket_name, filename, object_prefix);
 
-    std::thread *reader_threads = new std::thread[thread_count];
+    irods::thread_pool reader_threads{thread_count};
 
     for (int thread_number = 0; thread_number <  thread_count; ++thread_number) {
 
-        reader_threads[thread_number] = std::thread(download_part, hostname.c_str(),
-                    bucket_name.c_str(), access_key.c_str(), secret_access_key.c_str(),
-                    filename.c_str(), object_prefix.c_str(), thread_count, thread_number);
+        irods::thread_pool::post(reader_threads, [bucket_name, access_key,
+                secret_access_key, filename, object_prefix, thread_count, thread_number] () {
+
+
+            download_part(hostname.c_str(), bucket_name.c_str(), access_key.c_str(),
+                    secret_access_key.c_str(), filename.c_str(), object_prefix.c_str(),
+                    thread_count, thread_number);
+        });
     }
 
-    for (int thread_number = 0; thread_number < thread_count; ++thread_number) {
-        reader_threads[thread_number].join();
-    }
-
-    delete[] reader_threads;
+    reader_threads.join();
 
     check_download_results(bucket_name, filename, object_prefix);
 }
@@ -594,23 +596,24 @@ void do_read_write_thread(const std::string& bucket_name,
 
     read_write_stage_and_cleanup(bucket_name, filename, object_prefix);
 
-    std::thread *writer_threads = new std::thread[thread_count];
-
     std::string comparison_filename = filename + ".comparison";
+
+    irods::thread_pool writer_threads{thread_count};
 
     for (int thread_number = 0; thread_number <  thread_count; ++thread_number) {
 
-        writer_threads[thread_number] = std::thread(read_write_on_file, hostname.c_str(),
-                    bucket_name.c_str(), access_key.c_str(), secret_access_key.c_str(),
-                    filename.c_str(), object_prefix.c_str(),  thread_count, thread_number,
-                    comparison_filename.c_str(), open_modes);
+        irods::thread_pool::post(writer_threads, [bucket_name, access_key,
+                secret_access_key, filename, object_prefix, thread_count, thread_number,
+                comparison_filename, open_modes] () {
+
+
+            read_write_on_file(hostname.c_str(), bucket_name.c_str(), access_key.c_str(), secret_access_key.c_str(),
+                    filename.c_str(), object_prefix.c_str(), thread_count, thread_number, comparison_filename.c_str(),
+                    open_modes);
+        });
     }
 
-    for (int thread_number = 0; thread_number < thread_count; ++thread_number) {
-        writer_threads[thread_number].join();
-    }
-
-    delete[] writer_threads;
+    writer_threads.join();
 
     check_read_write_results(bucket_name, filename, object_prefix);
 }
@@ -619,42 +622,31 @@ void do_read_write_thread(const std::string& bucket_name,
 TEST_CASE("s3_transport_upload_multiple_threads", "[upload][thread]")
 {
 
+    std::string bucket_name = "justinkylejames1";
+    int thread_count = 2;
+    std::string filename = "medium_file";
+    std::string object_prefix = "dir1/dir2/";
+
     SECTION("upload large file with multiple threads")
     {
-        const std::string bucket_name = "justinkylejames1";
-        const int thread_count = 8;
-        const std::string filename = "large_file";
-        const std::string object_prefix = "dir1/dir2/";
-
+        thread_count = 8;
+        filename = "large_file";
         do_upload_thread(bucket_name, filename, object_prefix, keyfile, thread_count);
     }
 
     SECTION("upload medium file with multiple threads default settings")
     {
-        const std::string bucket_name = "justinkylejames1";
-        const int thread_count = 2;
-        const std::string filename = "medium_file";
-        const std::string object_prefix = "dir1/dir2/";
-
         do_upload_thread(bucket_name, filename, object_prefix, keyfile, thread_count);
     }
 
     SECTION("upload medium file with multiple threads under bucket root")
     {
-        const std::string bucket_name = "justinkylejames1";
-        const int thread_count = 2;
-        const std::string filename = "medium_file";
-        const std::string object_prefix = "";
-
+        object_prefix = "";
         do_upload_thread(bucket_name, filename, object_prefix, keyfile, thread_count);
     }
 
     SECTION("upload medium file with multiple threads signature_version=v2")
     {
-        const std::string bucket_name = "justinkylejames1";
-        const int thread_count = 2;
-        const std::string filename = "medium_file";
-        const std::string object_prefix = "dir1/dir2/";
         const std::string s3_signature_version_str = "v2";
         const std::string s3_protocol_str = "https";
         const std::string s3_sts_date_str = "date";
@@ -665,10 +657,6 @@ TEST_CASE("s3_transport_upload_multiple_threads", "[upload][thread]")
 
     SECTION("upload medium file with multiple threads protocol=http")
     {
-        const std::string bucket_name = "justinkylejames1";
-        const int thread_count = 2;
-        const std::string filename = "medium_file";
-        const std::string object_prefix = "dir1/dir2/";
         const std::string s3_signature_version_str = "v4";
         const std::string s3_protocol_str = "http";
         const std::string s3_sts_date_str = "both";
@@ -679,10 +667,6 @@ TEST_CASE("s3_transport_upload_multiple_threads", "[upload][thread]")
 
     SECTION("upload medium file with multiple threads sts_date=amz")
     {
-        const std::string bucket_name = "justinkylejames1";
-        const int thread_count = 2;
-        const std::string filename = "medium_file";
-        const std::string object_prefix = "dir1/dir2/";
         const std::string s3_signature_version_str = "v4";
         const std::string s3_protocol_str = "https";
         const std::string s3_sts_date_str = "amz";
@@ -693,10 +677,6 @@ TEST_CASE("s3_transport_upload_multiple_threads", "[upload][thread]")
 
     SECTION("upload medium file with multiple threads sts_date=date")
     {
-        const std::string bucket_name = "justinkylejames1";
-        const int thread_count = 2;
-        const std::string filename = "medium_file";
-        const std::string object_prefix = "dir1/dir2/";
         const std::string s3_signature_version_str = "v4";
         const std::string s3_protocol_str = "https";
         const std::string s3_sts_date_str = "date";
@@ -707,10 +687,6 @@ TEST_CASE("s3_transport_upload_multiple_threads", "[upload][thread]")
 
     SECTION("upload medium file with multiple threads sts_date=both")
     {
-        const std::string bucket_name = "justinkylejames1";
-        const int thread_count = 2;
-        const std::string filename = "medium_file";
-        const std::string object_prefix = "dir1/dir2/";
         const std::string s3_signature_version_str = "v4";
         const std::string s3_protocol_str = "https";
         const std::string s3_sts_date_str = "both";
@@ -721,19 +697,13 @@ TEST_CASE("s3_transport_upload_multiple_threads", "[upload][thread]")
 
     SECTION("upload medium file as single part")
     {
-        const std::string bucket_name = "justinkylejames1";
-        const std::string filename = "medium_file";
-        const std::string object_prefix = "dir1/dir2/";
-
+        thread_count = 1;
         do_upload_single_part(bucket_name, filename, object_prefix, keyfile);
     }
 
     SECTION("upload medium file as single part with server encrypt")
     {
-        const std::string bucket_name = "justinkylejames1";
-        const std::string filename = "medium_file";
-        const std::string object_prefix = "dir1/dir2/";
-
+        thread_count = 1;
         const std::string s3_signature_version_str = "4";
         const std::string s3_protocol_str = "http";
         const std::string s3_sts_date_str = "both";
@@ -746,53 +716,31 @@ TEST_CASE("s3_transport_upload_multiple_threads", "[upload][thread]")
 
 TEST_CASE("s3_transport_download_large_multiple_threads", "[download][thread]")
 {
+    std::string bucket_name = "justinkylejames1";
+    int thread_count = 2;
+    std::string filename = "medium_file";
+    std::string object_prefix = "dir1/dir2/";
 
     SECTION("download large file with multiple threads")
     {
-        std::string bucket_name = "justinkylejames1";
-        const int thread_count = 8;
-        const std::string filename = "large_file";
-        const std::string object_prefix = "dir1/dir2/";
-
+        thread_count = 8;
+        std::string filename = "large_file";
         do_download_thread(bucket_name, filename, object_prefix, keyfile, thread_count);
     }
 
     SECTION("download medium file with multiple threads")
     {
-        std::string bucket_name = "justinkylejames1";
-        const int thread_count = 2;
-        const std::string filename = "medium_file";
-        const std::string object_prefix = "dir1/dir2/";
-
-        do_download_thread(bucket_name, filename, object_prefix, keyfile, thread_count);
-    }
-
-    SECTION("download medium file with multiple threads under bucket root")
-    {
-        std::string bucket_name = "justinkylejames1";
-        const int thread_count = 2;
-        const std::string filename = "medium_file";
-        const std::string object_prefix = "dir1/dir2/";
-
         do_download_thread(bucket_name, filename, object_prefix, keyfile, thread_count);
     }
 
     SECTION("download medium file under bucket root")
     {
-        std::string bucket_name = "justinkylejames1";
-        const int thread_count = 2;
-        const std::string filename = "medium_file";
-        const std::string object_prefix = "";
-
+        object_prefix = "";
         do_download_thread(bucket_name, filename, object_prefix, keyfile, thread_count);
     }
 
     SECTION("download medium file with multiple threads s3_signature_version=2")
     {
-        std::string bucket_name = "justinkylejames1";
-        const int thread_count = 2;
-        const std::string filename = "medium_file";
-        const std::string object_prefix = "dir1/dir2/";
         std::string s3_signature_version_str = "2";
         std::string s3_protocol_str = "https";
 
@@ -803,10 +751,6 @@ TEST_CASE("s3_transport_download_large_multiple_threads", "[download][thread]")
 
     SECTION("download medium file with multiple threads protocol=http")
     {
-        std::string bucket_name = "justinkylejames1";
-        const int thread_count = 2;
-        const std::string filename = "medium_file";
-        const std::string object_prefix = "dir1/dir2/";
         std::string s3_signature_version_str = "v4";
         std::string s3_protocol_str = "http";
 
@@ -818,13 +762,13 @@ TEST_CASE("s3_transport_download_large_multiple_threads", "[download][thread]")
 
 TEST_CASE("s3_transport_upload_large_multiple_processes", "[upload_process][process]")
 {
+    std::string bucket_name = "justinkylejames1";
+    int process_count = 8;
+    std::string filename = "large_file";
+    std::string object_prefix = "dir1/dir2/";
+
     SECTION("upload large file with multiple processes")
     {
-
-        std::string bucket_name = "justinkylejames1";
-        const int process_count = 8;
-        const std::string filename = "large_file";
-        const std::string object_prefix = "dir1/dir2/";
 
         do_upload_process(bucket_name, filename, object_prefix, keyfile, process_count);
     }
@@ -832,39 +776,35 @@ TEST_CASE("s3_transport_upload_large_multiple_processes", "[upload_process][proc
 
 TEST_CASE("s3_transport_download_large_multiple_processes", "[download_process][process]")
 {
+    std::string bucket_name = "justinkylejames1";
+    int process_count = 8;
+    std::string filename = "medium_file";
+    std::string object_prefix = "dir1/dir2/";
+
     SECTION("upload large file with multiple processes")
     {
-        std::string bucket_name = "justinkylejames1";
-        const int process_count = 8;
-        const std::string filename = "large_file";
-        const std::string object_prefix = "dir1/dir2/";
-
         do_download_process(bucket_name, filename, object_prefix, keyfile, process_count);
     }
 }
 
 TEST_CASE("s3_transport_readwrite_thread", "[rw][thread]")
 {
+    std::string bucket_name = "justinkylejames1";
+    int thread_count = 1;
+    std::string filename = "medium_file";
+    std::string object_prefix = "dir1/dir2/";
+
     SECTION("read write small file")
     {
-
-        std::string bucket_name = "justinkylejames1";
-        const int thread_count = 8;
-        const std::string filename = "small_file";
-        const std::string object_prefix = "dir1/dir2/";
-
+        thread_count = 8;
+        filename = "small_file";
         do_read_write_thread(bucket_name, filename, object_prefix, keyfile, thread_count);
 
     }
 
     SECTION("read write medium file")
     {
-
-        std::string bucket_name = "justinkylejames1";
-        const int thread_count = 8;
-        const std::string filename = "medium_file";
-        const std::string object_prefix = "dir1/dir2/";
-
+        thread_count = 8;
         do_read_write_thread(bucket_name, filename, object_prefix, keyfile, thread_count);
 
     }
@@ -872,12 +812,7 @@ TEST_CASE("s3_transport_readwrite_thread", "[rw][thread]")
     SECTION("read write medium file open with truncate")
     {
 
-        std::string bucket_name = "justinkylejames1";
-        const int thread_count = 1;
-        const std::string filename = "medium_file";
-        const std::string object_prefix = "dir1/dir2/";
         std::ios_base::openmode open_modes = std::ios_base::in | std::ios_base::out | std::ios_base::trunc;
-
         do_read_write_thread(bucket_name, filename, object_prefix, keyfile, thread_count, open_modes);
 
     }
@@ -885,12 +820,7 @@ TEST_CASE("s3_transport_readwrite_thread", "[rw][thread]")
     SECTION("read write medium file open with append")
     {
 
-        std::string bucket_name = "justinkylejames1";
-        const int thread_count = 1;
-        const std::string filename = "medium_file";
-        const std::string object_prefix = "dir1/dir2/";
         std::ios_base::openmode open_modes = std::ios_base::in | std::ios_base::out | std::ios_base::app;
-
         do_read_write_thread(bucket_name, filename, object_prefix, keyfile, thread_count, open_modes);
 
     }

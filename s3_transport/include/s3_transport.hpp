@@ -93,7 +93,7 @@ namespace irods::experimental::io::s3_transport
         std::string  s3_sts_date_str;
         std::string  cache_directory;
         bool         debug_flag;
-        int          thread_identifier;          // just for debug purposes
+        unsigned int thread_identifier;          // just for debug purposes
     };
 
     template <typename CharT>
@@ -283,7 +283,7 @@ namespace irods::experimental::io::s3_transport
                 // This was a full multipart upload, wait for the upload to complete
 
                 if (config_.debug_flag) {
-                    printf("%s:%d (%s) [[%d]] wait for join of upload thread\n",
+                    printf("%s:%d (%s) [[%u]] wait for join of upload thread\n",
                             __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
                 }
 
@@ -294,7 +294,7 @@ namespace irods::experimental::io::s3_transport
                 }
 
                 if (config_.debug_flag) {
-                    printf("%s:%d (%s) [[%d]] join for part\n",
+                    printf("%s:%d (%s) [[%u]] join for part\n",
                             __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
                 }
             }
@@ -327,7 +327,7 @@ namespace irods::experimental::io::s3_transport
                 });
 
                 if (config_.debug_flag) {
-                    printf("%s:%d (%s) [[%d]] [last_file_to_close=%d]\n",
+                    printf("%s:%d (%s) [[%u]] [last_file_to_close=%d]\n",
                             __FILE__, __LINE__, __FUNCTION__, thread_identifier_,
                             last_file_to_close);
                     fflush(stdout);
@@ -344,7 +344,7 @@ namespace irods::experimental::io::s3_transport
                     if (use_cache_) {
 
                         if (error_codes::SUCCESS != flush_cache_file(shm_obj)) {
-                            fprintf(stderr, "%s:%d (%s) [[%d]] flush_cache_file returned error\n",
+                            fprintf(stderr, "%s:%d (%s) [[%u]] flush_cache_file returned error\n",
                                     __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
                             return_value = false;
                         }
@@ -432,7 +432,7 @@ namespace irods::experimental::io::s3_transport
             circular_buffer_.push_back({copied_buffer, false});
 
             if (config_.debug_flag) {
-                printf("%s:%d (%s) [[%d]] wrote buffer of size %ld\n",
+                printf("%s:%d (%s) [[%u]] wrote buffer of size %ld\n",
                         __FILE__, __LINE__, __FUNCTION__, thread_identifier_, _buffer_size);
             }
 
@@ -513,7 +513,7 @@ namespace irods::experimental::io::s3_transport
         {
             std::fstream fs(cache_file_path_);
             if (!fs || !fs.is_open()) {
-                fprintf(stderr, "%s:%d (%s) [[%d]] could not open cache file to get size\n",
+                fprintf(stderr, "%s:%d (%s) [[%u]] could not open cache file to get size\n",
                         __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
                 return 0;
             }
@@ -538,7 +538,7 @@ namespace irods::experimental::io::s3_transport
                 });
 
                 if (error_codes::SUCCESS != ret) {
-                    fprintf(stderr, "%s:%d (%s) [[%d]] open returning false [last_error_code=%d]\n",
+                    fprintf(stderr, "%s:%d (%s) [[%u]] open returning false [last_error_code=%d]\n",
                             __FILE__, __LINE__, __FUNCTION__, thread_identifier_, ret);
 
                     // update the last error
@@ -550,7 +550,7 @@ namespace irods::experimental::io::s3_transport
                 }
             } else {
                 if (error_codes::SUCCESS != last_error_code) {
-                    fprintf(stderr, "%s:%d (%s) [[%d]] open returning false [last_error_code=%d]\n",
+                    fprintf(stderr, "%s:%d (%s) [[%u]] open returning false [last_error_code=%d]\n",
                             __FILE__, __LINE__, __FUNCTION__, thread_identifier_,
                             last_error_code);
                     return false;
@@ -573,7 +573,7 @@ namespace irods::experimental::io::s3_transport
                 // TODO if parent's parent doesn't exist this fails
                 boost::filesystem::create_directories(parent_path);
             } catch (boost::filesystem::filesystem_error& e) {
-                fprintf(stderr, "%s:%d (%s) [[%d]] Could not download file to cache.  %s\n",
+                fprintf(stderr, "%s:%d (%s) [[%u]] Could not download file to cache.  %s\n",
                         __FILE__, __LINE__, __FUNCTION__, thread_identifier_, e.what());
                 return cache_file_download_status::FAILED;
             }
@@ -599,7 +599,7 @@ namespace irods::experimental::io::s3_transport
                 if (s3_object_size > disk_space_available)
                 {
 
-                    fprintf(stderr, "%s:%d (%s) [[%d]] Not enough disk space to download object to cache.\n",
+                    fprintf(stderr, "%s:%d (%s) [[%u]] Not enough disk space to download object to cache.\n",
                             __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
 
                     return shm_obj.atomic_exec([](auto& data) {
@@ -678,7 +678,7 @@ namespace irods::experimental::io::s3_transport
         error_codes flush_cache_file(named_shared_memory_object& shm_obj) {
 
             if (config_.debug_flag) {
-                printf("%s:%d (%s) [[%d]] Flushing cache file.\n",
+                printf("%s:%d (%s) [[%u]] Flushing cache file.\n",
                         __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
             }
 
@@ -696,7 +696,7 @@ namespace irods::experimental::io::s3_transport
             std::ifstream ifs;
             ifs.open(cache_file_path_.c_str(), std::ios::out);
             if (!ifs || !ifs.is_open()) {
-                fprintf(stderr, "%s:%d (%s) [[%d]] Failed to open cache file.\n",
+                fprintf(stderr, "%s:%d (%s) [[%u]] Failed to open cache file.\n",
                         __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
                 return error_codes::UPLOAD_FILE_ERROR;
             }
@@ -838,7 +838,7 @@ namespace irods::experimental::io::s3_transport
             namespace bf = boost::filesystem;
 
             if (config_.debug_flag) {
-                printf("%s:%d (%s) [[%d]] [_mode & in = %d][_mode & out = %d]"
+                printf("%s:%d (%s) [[%u]] [_mode & in = %d][_mode & out = %d]"
                     "[_mode & trunc = %d][_mode & app = %d]\n",
                     __FILE__, __LINE__, __FUNCTION__, thread_identifier_,
                     (_mode & std::ios_base::in) == std::ios_base::in,
@@ -859,13 +859,13 @@ namespace irods::experimental::io::s3_transport
             int open_flags = populate_open_mode_flags();
 
             if (open_flags == translation_error) {
-                printf("%s:%d (%s) [[%d]] Invalid open mode detected.\n",
+                printf("%s:%d (%s) [[%u]] Invalid open mode detected.\n",
                         __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
                 return false;
             }
 
             if (config_.debug_flag) {
-                printf("%s:%d (%s) [[%d]] [object_key_ = %s][config_.multipart_flag = %d][use_cache_ = %d]"
+                printf("%s:%d (%s) [[%u]] [object_key_ = %s][config_.multipart_flag = %d][use_cache_ = %d]"
                     "[download_to_cache_ = %d][O_WRONLY = %d][O_RDONLY = %d]\n",
                     __FILE__, __LINE__, __FUNCTION__, thread_identifier_,
                     object_key_.c_str(),
@@ -971,7 +971,7 @@ namespace irods::experimental::io::s3_transport
                     try {
                         boost::filesystem::create_directories(parent_path);
                     } catch (boost::filesystem::filesystem_error& e) {
-                        fprintf(stderr, "%s:%d (%s) [[%d]] Could not parent directories for cache file.  %s\n",
+                        fprintf(stderr, "%s:%d (%s) [[%u]] Could not parent directories for cache file.  %s\n",
                                 __FILE__, __LINE__, __FUNCTION__, thread_identifier_, e.what());
                         return false;
                     }
@@ -981,7 +981,7 @@ namespace irods::experimental::io::s3_transport
                             std::ios_base::in | std::ios_base::out | _mode);
 
                     if (!cache_fstream_ || !cache_fstream_.is_open()) {
-                        fprintf(stderr, "%s:%d (%s) [[%d]] Failed to open cache file.\n",
+                        fprintf(stderr, "%s:%d (%s) [[%u]] Failed to open cache file.\n",
                                 __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
                         critical_error_encountered_ = true;
                         return false;
@@ -1065,14 +1065,14 @@ namespace irods::experimental::io::s3_transport
 
                 do {
                     if (config_.debug_flag) {
-                        printf("%s:%d (%s) [[%d]] call S3_initiate_multipart [object_key=%s]\n",
+                        printf("%s:%d (%s) [[%u]] call S3_initiate_multipart [object_key=%s]\n",
                                 __FILE__, __LINE__, __FUNCTION__, thread_identifier_, object_key_.c_str());
                     }
                     S3_initiate_multipart(&bucket_context_, object_key_.c_str(),
                             &put_props_, &mpu_initial_handler, nullptr, &upload_manager_);
 
                     if (config_.debug_flag) {
-                        printf("%s:%d (%s) [[%d]] [manager.status=%s]\n", __FILE__, __LINE__,
+                        printf("%s:%d (%s) [[%u]] [manager.status=%s]\n", __FILE__, __LINE__,
                                 __FUNCTION__, thread_identifier_, S3_get_status_name(upload_manager_.status));
                     }
 
@@ -1089,7 +1089,7 @@ namespace irods::experimental::io::s3_transport
                 }
 
                 if (config_.debug_flag) {
-                    printf("%s:%d (%s) [[%d]] S3_initiate_multipart returned.  Upload ID = %s\n",
+                    printf("%s:%d (%s) [[%u]] S3_initiate_multipart returned.  Upload ID = %s\n",
                             __FILE__, __LINE__, __FUNCTION__, thread_identifier_,
                             data.upload_id.c_str());
                 }
@@ -1145,7 +1145,7 @@ namespace irods::experimental::io::s3_transport
                 if (status >= 0) {
                     msg << " - \"" << S3_get_status_name(status) << "\"";
                 }
-                printf( "%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, thread_identifier_,
+                printf( "%s:%d (%s) [[%u]] %s\n", __FILE__, __LINE__, __FUNCTION__, thread_identifier_,
                         msg.str().c_str() );
             }
         } // end mpu_cancel
@@ -1176,7 +1176,7 @@ namespace irods::experimental::io::s3_transport
                         msg.str( std::string() ); // Clear
                         msg << "Multipart:  Completing key \"" << object_key_.c_str() << "\" Upload ID \""
                             << upload_id << "\"";
-                        printf( "%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, thread_identifier_,
+                        printf( "%s:%d (%s) [[%u]] %s\n", __FILE__, __LINE__, __FUNCTION__, thread_identifier_,
                                 msg.str().c_str() );
                     }
 
@@ -1208,7 +1208,7 @@ namespace irods::experimental::io::s3_transport
                                 &commit_handler, upload_id.c_str(),
                                 upload_manager_.remaining, nullptr, &upload_manager_);
                         if (config_.debug_flag) {
-                            printf("%s:%d (%s) [[%d]] [manager.status=%s]\n", __FILE__, __LINE__,
+                            printf("%s:%d (%s) [[%u]] [manager.status=%s]\n", __FILE__, __LINE__,
                                     __FUNCTION__, thread_identifier_, S3_get_status_name(upload_manager_.status));
                         }
                         if (upload_manager_.status != libs3_types::status_ok) s3_sleep( config_.retry_wait_seconds, 0 );
@@ -1309,9 +1309,9 @@ namespace irods::experimental::io::s3_transport
                 if (config_.debug_flag) {
                     msg.str( std::string() ); // Clear
                     msg << "Multirange:  Start range key \"" << object_key_ << "\", offset "
-                        << static_cast<long>(read_callback->offset) << ", len "
+                        << static_cast<long>(offset) << ", len "
                         << static_cast<int>(read_callback->content_length);
-                    printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, thread_identifier_,
+                    printf("%s:%d (%s) [[%u]] %s\n", __FILE__, __LINE__, __FUNCTION__, thread_identifier_,
                             msg.str().c_str());
                 }
 
@@ -1325,7 +1325,7 @@ namespace irods::experimental::io::s3_transport
                     double bw = (read_callback->content_length / (1024.0*1024.0)) /
                         ( (end_microseconds - start_microseconds) / 1000000.0 );
                     msg << " -- END -- BW=" << bw << " MB/s";
-                    printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__,
+                    printf("%s:%d (%s) [[%u]] %s\n", __FILE__, __LINE__, __FUNCTION__,
                             thread_identifier_, msg.str().c_str());
                 }
 
@@ -1341,7 +1341,7 @@ namespace irods::experimental::io::s3_transport
                 if (read_callback->status >= 0) {
                     msg << " - \"" << S3_get_status_name( read_callback->status ) << "\"";
                 }
-                printf("%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__,
+                printf("%s:%d (%s) [[%u]] %s\n", __FILE__, __LINE__, __FUNCTION__,
                         thread_identifier_, msg.str().c_str());
             }
 
@@ -1446,12 +1446,12 @@ namespace irods::experimental::io::s3_transport
 
                 // read the first page
                 if (config_.debug_flag) {
-                    printf("%s:%d (%s) [[%d]] waiting to read\n",
+                    printf("%s:%d (%s) [[%u]] waiting to read\n",
                             __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
                 }
                 circular_buffer_.pop_front(page);
                 if (config_.debug_flag) {
-                    printf("%s:%d (%s) [[%d]] read page [buffer=%p][buffer_size=%lu][terminate_flag=%d]\n",
+                    printf("%s:%d (%s) [[%u]] read page [buffer=%p][buffer_size=%lu][terminate_flag=%d]\n",
                             __FILE__, __LINE__, __FUNCTION__, thread_identifier_, page.buffer.data(),
                             page.buffer.size(), page.terminate_flag);
                 }
@@ -1514,7 +1514,7 @@ namespace irods::experimental::io::s3_transport
                     msg << "Multipart:  Start part " << static_cast<int>(write_callback->sequence) << ", key \""
                         << object_key_ << "\", uploadid \"" << upload_id
                         << "\", len " << static_cast<int>(write_callback->content_length);
-                    printf( "%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, thread_identifier_,
+                    printf( "%s:%d (%s) [[%u]] %s\n", __FILE__, __LINE__, __FUNCTION__, thread_identifier_,
                             msg.str().c_str() );
                 }
 
@@ -1528,7 +1528,7 @@ namespace irods::experimental::io::s3_transport
                 put_props_.expires = -1;
 
                 if (config_.debug_flag) {
-                    printf("%s:%d (%s) [[%d]] S3_upload_part (ctx, %s, props, handler, %lu, "
+                    printf("%s:%d (%s) [[%u]] S3_upload_part (ctx, %s, props, handler, %lu, "
                            "uploadId, %lu, 0, partData)\n", __FILE__, __LINE__, __FUNCTION__, thread_identifier_,
                            object_key_.c_str(), write_callback->sequence,
                            write_callback->content_length);
@@ -1539,7 +1539,7 @@ namespace irods::experimental::io::s3_transport
                         write_callback->content_length, 0, write_callback.get());
 
                 if (config_.debug_flag) {
-                    printf("%s:%d (%s) [[%d]] S3_upload_part returned [part=%lu][status=%s].\n",
+                    printf("%s:%d (%s) [[%u]] S3_upload_part returned [part=%lu][status=%s].\n",
                             __FILE__, __LINE__, __FUNCTION__, thread_identifier_, write_callback->sequence,
                             S3_get_status_name(write_callback->status));
                 }
@@ -1547,7 +1547,7 @@ namespace irods::experimental::io::s3_transport
                 if (config_.debug_flag) {
                     std::stringstream msg;
                     msg << "Multipart:  -- END -- BW=";// << bw << " MB/s";
-                    printf( "%s:%d (%s) [[%d]] %s\n", __FILE__, __LINE__, __FUNCTION__, thread_identifier_,
+                    printf( "%s:%d (%s) [[%u]] %s\n", __FILE__, __LINE__, __FUNCTION__, thread_identifier_,
                             msg.str().c_str() );
                 }
                 if (write_callback->status != libs3_types::status_ok) s3_sleep( config_.retry_wait_seconds, 0 );
@@ -1618,12 +1618,12 @@ namespace irods::experimental::io::s3_transport
 
                     // read the first page
                     if (config_.debug_flag) {
-                        printf("%s:%d (%s) [[%d]] waiting to read\n",
+                        printf("%s:%d (%s) [[%u]] waiting to read\n",
                                 __FILE__, __LINE__, __FUNCTION__, thread_identifier_);
                     }
                     circular_buffer_.pop_front(page);
                     if (config_.debug_flag) {
-                        printf("%s:%d (%s) [[%d]] read page [buffer=%p][buffer_size=%lu][terminate_flag=%d]\n",
+                        printf("%s:%d (%s) [[%u]] read page [buffer=%p][buffer_size=%lu][terminate_flag=%d]\n",
                                 __FILE__, __LINE__, __FUNCTION__, thread_identifier_, page.buffer.data(),
                                 page.buffer.size(), page.terminate_flag);
                     }
@@ -1653,7 +1653,7 @@ namespace irods::experimental::io::s3_transport
                 put_props_.expires = -1;
 
                 if (config_.debug_flag) {
-                    printf("%s:%d (%s) [[%d]] S3_put_object(ctx, %s, "
+                    printf("%s:%d (%s) [[%u]] S3_put_object(ctx, %s, "
                            "%lu, put_props_, 0, &putObjectHandler, &data)\n",
                            __FILE__, __LINE__, __FUNCTION__, thread_identifier_,
                            object_key_.c_str(),
@@ -1664,7 +1664,7 @@ namespace irods::experimental::io::s3_transport
                         &put_props_, 0, &put_object_handler, write_callback.get());
 
                 if (config_.debug_flag) {
-                    printf("%s:%d (%s) [[%d]] S3_put_object returned [status=%s].\n",
+                    printf("%s:%d (%s) [[%u]] S3_put_object returned [status=%s].\n",
                             __FILE__, __LINE__, __FUNCTION__, thread_identifier_,
                             S3_get_status_name(write_callback->status));
                 }
@@ -1702,7 +1702,7 @@ namespace irods::experimental::io::s3_transport
         bool                         object_must_exist_;
 
         // just for debugging purposes
-        int                          thread_identifier_;
+        unsigned int                 thread_identifier_;
 
         upload_manager               upload_manager_;
         S3PutProperties              put_props_;

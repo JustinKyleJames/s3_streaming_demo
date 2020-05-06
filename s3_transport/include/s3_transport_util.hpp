@@ -135,7 +135,7 @@ namespace irods::experimental::io::s3_transport
         libs3_types::bucket_context&
                             saved_bucket_context;   // To enable more detailed error messages
         bool                debug_flag;
-        int                 thread_identifier;
+        unsigned int        thread_identifier;
     };
 
     struct data_for_head_callback
