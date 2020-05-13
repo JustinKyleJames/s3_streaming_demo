@@ -24,8 +24,9 @@ using s3_transport_config = irods::experimental::io::s3_transport::config;
 namespace fs = irods::experimental::filesystem;
 namespace io = irods::experimental::io;
 
-const std::string keyfile = "/projects/irods/vsphere-testing/externals/amazon_web_services-CI.keypair";
-const std::string hostname = "s3.amazonaws.com";
+std::string keyfile = "/projects/irods/vsphere-testing/externals/amazon_web_services-CI.keypair";
+std::string hostname = "s3.amazonaws.com";
+std::string bucket_name = "justinkylejames1";
 
 void read_keys(const std::string& keyfile, std::string& access_key, std::string& secret_access_key)
 {
@@ -45,12 +46,13 @@ void read_keys(const std::string& keyfile, std::string& access_key, std::string&
     }
 }
 
-void upload_stage_and_cleanup(const std::string& bucket_name, const std::string& filename, const std::string& object_prefix)
+void upload_stage_and_cleanup(const std::string& bucket_name, const std::string& filename,
+        const std::string& object_prefix)
 {
     // clean up from a previous test, ignore errors
     std::stringstream ss;
-    ss << "aws s3 rm s3://" << bucket_name << "/" << object_prefix
-       << filename;
+    ss << "aws --endpoint-url http://" << hostname << " s3 rm s3://" << bucket_name
+        << "/" << object_prefix << filename;
     system(ss.str().c_str());
 
     ss.str("");
@@ -62,7 +64,7 @@ void download_stage_and_cleanup(const std::string& bucket_name, const std::strin
 {
     // stage file to s3 and cleanup from previous tests
     std::stringstream ss;
-    ss << "aws s3 cp " << filename << " s3://" << bucket_name << "/" << object_prefix
+    ss << "aws --endpoint-url http://" << hostname << " s3 cp " << filename << " s3://" << bucket_name << "/" << object_prefix
        << filename;
     system(ss.str().c_str());
 
@@ -76,7 +78,7 @@ void read_write_stage_and_cleanup(const std::string& bucket_name, const std::str
 
     // stage the file to s3 and cleanup
     std::stringstream ss;
-    ss << "aws s3 cp " << filename << " s3://" << bucket_name << "/" << object_prefix
+    ss << "aws --endpoint-url http://" << hostname << " s3 cp " << filename << " s3://" << bucket_name << "/" << object_prefix
        << filename;
     system(ss.str().c_str());
 
@@ -98,7 +100,7 @@ void check_upload_results(const std::string& bucket_name, const std::string& fil
 {
     // download the file and compare (using s3 client with system calls for now)
     std::stringstream ss;
-    ss << "aws s3 cp s3://" << bucket_name << "/" << object_prefix
+    ss << "aws --endpoint-url http://" << hostname << " s3 cp s3://" << bucket_name << "/" << object_prefix
        << filename << " " << filename << ".downloaded";
     int download_return_val = system(ss.str().c_str());
 
@@ -132,7 +134,7 @@ void check_read_write_results(const std::string& bucket_name, const std::string&
 
     // download the file and compare (using s3 client with system calls for now)
     std::stringstream ss;
-    ss << "aws s3 cp s3://" << bucket_name << "/" << object_prefix
+    ss << "aws --endpoint-url http://" << hostname << " s3 cp s3://" << bucket_name << "/" << object_prefix
        << filename << " " << downloaded_filename;
     int download_return_val = system(ss.str().c_str());
 
@@ -203,7 +205,6 @@ void upload_part(const char* const hostname,
     s3_config.bucket_name = bucket_name;
     s3_config.access_key = access_key;
     s3_config.secret_access_key = secret_access_key;
-    s3_config.thread_identifier = thread_number;
     s3_config.debug_flag = false;
     s3_config.multipart_flag = multipart_flag;
     s3_config.shared_memory_timeout_in_seconds = 60;
@@ -284,7 +285,6 @@ void download_part(const char* const hostname,
     s3_config.bucket_name = bucket_name;
     s3_config.access_key = access_key;
     s3_config.secret_access_key = secret_access_key;
-    s3_config.thread_identifier = thread_number;
     s3_config.debug_flag = false;
     s3_config.multipart_flag = true;
     s3_config.shared_memory_timeout_in_seconds = 60;
@@ -350,7 +350,6 @@ void read_write_on_file(const char *hostname,
     s3_config.bucket_name = bucket_name;
     s3_config.access_key = access_key;
     s3_config.secret_access_key = secret_access_key;
-    s3_config.thread_identifier = thread_number;
     s3_config.debug_flag = false;
     s3_config.multipart_flag = false;
     s3_config.shared_memory_timeout_in_seconds = 60;
@@ -619,17 +618,27 @@ void do_read_write_thread(const std::string& bucket_name,
 }
 
 
-TEST_CASE("s3_transport_upload_multiple_threads", "[upload][thread]")
+TEST_CASE("quick test", "[quick_test]")
 {
 
-    std::string bucket_name = "justinkylejames1";
+    SECTION("upload large file with multiple threads")
+    {
+        int thread_count = 7;
+        std::string filename = "large_file";
+        std::string object_prefix = "dir1/dir2/";
+        do_upload_thread(bucket_name, filename, object_prefix, keyfile, thread_count);
+    }
+}
+
+TEST_CASE("s3_transport_upload_multiple_threads", "[upload][thread]")
+{
     int thread_count = 2;
     std::string filename = "medium_file";
     std::string object_prefix = "dir1/dir2/";
 
     SECTION("upload large file with multiple threads")
     {
-        thread_count = 8;
+        thread_count = 10;
         filename = "large_file";
         do_upload_thread(bucket_name, filename, object_prefix, keyfile, thread_count);
     }
@@ -716,7 +725,6 @@ TEST_CASE("s3_transport_upload_multiple_threads", "[upload][thread]")
 
 TEST_CASE("s3_transport_download_large_multiple_threads", "[download][thread]")
 {
-    std::string bucket_name = "justinkylejames1";
     int thread_count = 2;
     std::string filename = "medium_file";
     std::string object_prefix = "dir1/dir2/";
@@ -762,7 +770,6 @@ TEST_CASE("s3_transport_download_large_multiple_threads", "[download][thread]")
 
 TEST_CASE("s3_transport_upload_large_multiple_processes", "[upload_process][process]")
 {
-    std::string bucket_name = "justinkylejames1";
     int process_count = 8;
     std::string filename = "large_file";
     std::string object_prefix = "dir1/dir2/";
@@ -776,7 +783,6 @@ TEST_CASE("s3_transport_upload_large_multiple_processes", "[upload_process][proc
 
 TEST_CASE("s3_transport_download_large_multiple_processes", "[download_process][process]")
 {
-    std::string bucket_name = "justinkylejames1";
     int process_count = 8;
     std::string filename = "medium_file";
     std::string object_prefix = "dir1/dir2/";
@@ -789,7 +795,6 @@ TEST_CASE("s3_transport_download_large_multiple_processes", "[download_process][
 
 TEST_CASE("s3_transport_readwrite_thread", "[rw][thread]")
 {
-    std::string bucket_name = "justinkylejames1";
     int thread_count = 1;
     std::string filename = "medium_file";
     std::string object_prefix = "dir1/dir2/";
