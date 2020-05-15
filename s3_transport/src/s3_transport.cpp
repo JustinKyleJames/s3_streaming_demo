@@ -71,13 +71,13 @@ namespace irods::experimental::io::s3_transport
 
         if (debug_flag || status != libs3_types::status_ok)
             printf( "  Function: %s\n", function.c_str() );
-        if ((debug_flag || error) && error->message)
+        if (debug_flag && error && error->message)
             printf( "  Message: %s\n", error->message);
-        if ((debug_flag || error) && error->resource)
+        if (debug_flag && error && error->resource)
             printf( "  Resource: %s\n", error->resource);
-        if ((debug_flag || error) && error->furtherDetails)
+        if (debug_flag && error && error->furtherDetails)
             printf( "  Further Details: %s\n", error->furtherDetails);
-        if ((debug_flag || error) && error->extraDetailsCount) {
+        if (debug_flag && error && error->extraDetailsCount) {
             printf( "%s", "  Extra Details:\n");
 
             for (int i = 0; i < error->extraDetailsCount; i++) {
