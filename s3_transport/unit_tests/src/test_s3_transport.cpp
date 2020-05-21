@@ -205,8 +205,8 @@ void upload_part(const char* const hostname,
     s3_config.bucket_name = bucket_name;
     s3_config.access_key = access_key;
     s3_config.secret_access_key = secret_access_key;
-    s3_config.debug_flag = false;
-    s3_config.multipart_flag = multipart_flag;
+    s3_config.debug_flag = true;
+    s3_config.multipart_upload_flag = multipart_flag;
     s3_config.shared_memory_timeout_in_seconds = 60;
     s3_config.s3_signature_version_str = s3_signature_version_str;
     s3_config.s3_protocol_str = s3_protocol_str;
@@ -286,7 +286,7 @@ void download_part(const char* const hostname,
     s3_config.access_key = access_key;
     s3_config.secret_access_key = secret_access_key;
     s3_config.debug_flag = false;
-    s3_config.multipart_flag = true;
+    s3_config.multipart_upload_flag = false;
     s3_config.shared_memory_timeout_in_seconds = 60;
 
     s3_transport tp1{s3_config};
@@ -350,8 +350,8 @@ void read_write_on_file(const char *hostname,
     s3_config.bucket_name = bucket_name;
     s3_config.access_key = access_key;
     s3_config.secret_access_key = secret_access_key;
-    s3_config.debug_flag = false;
-    s3_config.multipart_flag = false;
+    s3_config.debug_flag = true;
+    s3_config.multipart_upload_flag = false;
     s3_config.shared_memory_timeout_in_seconds = 60;
 
     s3_transport tp1{s3_config};

@@ -62,7 +62,7 @@ namespace irods::experimental::io::s3_transport
             , bucket_name{""}
             , access_key{""}
             , secret_access_key{""}
-            , multipart_flag{true}
+            , multipart_upload_flag{true}
             , shared_memory_timeout_in_seconds{constants::DEFAULT_SHARED_MEMORY_TIMEOUT_IN_SECONDS}
             , enable_md5_flag{false}
             , server_encrypt_flag{false}
@@ -83,7 +83,7 @@ namespace irods::experimental::io::s3_transport
         std::string  bucket_name;
         std::string  access_key;
         std::string  secret_access_key;
-        bool         multipart_flag;
+        bool         multipart_upload_flag;
         time_t       shared_memory_timeout_in_seconds;
         bool         enable_md5_flag;
         bool         server_encrypt_flag;
@@ -273,9 +273,9 @@ namespace irods::experimental::io::s3_transport
 
             fd_ = uninitialized_file_descriptor;
 
-            int open_flags = populate_open_mode_flags();
+            populate_open_mode_flags();
 
-            if ( is_full_multipart_upload(open_flags) ) {
+            if ( is_full_upload() && config_.multipart_upload_flag ) {
 
                 // This was a full multipart upload, wait for the upload to complete
 
@@ -348,9 +348,10 @@ namespace irods::experimental::io::s3_transport
 
                     } else {
 
-                        return_value = shm_obj.atomic_exec( [this, open_flags](auto& data) {
+                        return_value = shm_obj.atomic_exec( [this](auto& data) {
 
-                            if ( is_full_multipart_upload(open_flags) ) {
+                            if ( is_full_upload() && config_.multipart_upload_flag ) {
+
                                 if (error_codes::SUCCESS != complete_multipart_upload()) {
                                     return false;
                                 }
@@ -440,7 +441,7 @@ namespace irods::experimental::io::s3_transport
 
             // if we haven't already started an upload thread, start it
             if (!begin_part_upload_thread_ptr_) {
-                if (config_.multipart_flag) {
+                if (config_.multipart_upload_flag) {
                     begin_part_upload_thread_ptr_ = std::make_unique<std::thread>(
                             &s3_transport::s3_upload_part_worker_routine, this, false, 0, 0);
                 } else {
@@ -511,6 +512,7 @@ namespace irods::experimental::io::s3_transport
         }
 
     private:
+
 
         unsigned int get_thread_identifier() {
             return std::hash<std::thread::id>{}(std::this_thread::get_id());
@@ -721,7 +723,7 @@ namespace irods::experimental::io::s3_transport
 
             uint64_t part_size = cache_file_size / config_.number_of_transfer_threads;
 
-            if (config_.multipart_flag && number_of_transfer_threads > 1) {
+            if (config_.multipart_upload_flag && number_of_transfer_threads > 1) {
 
                 initiate_multipart_upload();
 
@@ -757,18 +759,20 @@ namespace irods::experimental::io::s3_transport
 
         }
 
-        bool is_full_multipart_upload(int open_flags) {
-            return ( config_.multipart_flag && is_full_upload(open_flags) );
-        }
-
-        bool is_full_upload(int open_flags) {
-            return ( (O_CREAT | O_WRONLY | O_TRUNC) == open_flags );
+        // TODO
+        bool is_full_upload() {
+            using std::ios_base;
+            const auto m = mode_ & ~(ios_base::ate | ios_base::binary);
+            return (ios_base::out == m && config_.multipart_upload_flag) ||
+                (ios_base::out | ios_base::trunc) == m;
+            //return ( (O_CREAT | O_WRONLY | O_TRUNC) == open_flags );
         }
 
         // This populates the following flags based on the open mode (mode_).
         //   - download_to_cache_ - Set to true iff:
         //                             * the object is open for writing (optionally reading)
-        //                               and the object is not being truncated
+        //                               and the object is not being truncated and the multipart_upload_flag
+        //                               is not set
         //   - use_cache_         - Set to true iff one of the following applies:
         //                             * download_to_cache_ is true
         //                             * open for reading and writing with the truncate flag
@@ -776,7 +780,7 @@ namespace irods::experimental::io::s3_transport
         //                          following link: https://en.cppreference.com/w/cpp/io/basic_filebuf/open
         //
         // Return value - The translation of the stream open modes to posix open modes.
-        int populate_open_mode_flags() noexcept
+        void populate_open_mode_flags() noexcept
         {
             using std::ios_base;
 
@@ -786,31 +790,43 @@ namespace irods::experimental::io::s3_transport
                 download_to_cache_ = false;
                 use_cache_ = false;
                 object_must_exist_ = true;
-                return O_RDONLY;
+                //return O_RDONLY;
             }
-            else if (ios_base::out == m || (ios_base::out | ios_base::trunc) == m) {
+            else if (ios_base::out == m && config_.multipart_upload_flag) {
                 download_to_cache_ = false;
                 use_cache_ = false;
                 object_must_exist_ = false;
-                return O_CREAT | O_WRONLY | O_TRUNC;
+                //return O_CREAT | O_WRONLY | O_TRUNC;
+            }
+            else if (ios_base::out == m) {
+                download_to_cache_ = true;
+                use_cache_ = true;
+                object_must_exist_ = false;
+                //return O_CREAT | O_WRONLY;
+            }
+            else if ((ios_base::out | ios_base::trunc) == m) {
+                download_to_cache_ = false;
+                use_cache_ = false;
+                object_must_exist_ = false;
+                //return O_CREAT | O_WRONLY | O_TRUNC;
             }
             else if (ios_base::app == m || (ios_base::out | ios_base::app) == m) {
                 download_to_cache_ = true;
                 use_cache_ = true;
                 object_must_exist_ = false;
-                return O_CREAT | O_WRONLY | O_APPEND;
+                //return O_CREAT | O_WRONLY | O_APPEND;
             }
             else if ((ios_base::out | ios_base::in) == m) {
                 download_to_cache_ = true;
                 use_cache_ = true;
                 object_must_exist_ = true;
-                return O_RDWR;
+                //return O_RDWR;
             }
             else if ((ios_base::out | ios_base::in | ios_base::trunc) == m) {
                 download_to_cache_ = false;
                 use_cache_ = true;
                 object_must_exist_ = false;
-                return O_CREAT | O_RDWR | O_TRUNC;
+                //return O_CREAT | O_RDWR | O_TRUNC;
             }
             else if ((ios_base::out | ios_base::in | ios_base::app) == m ||
                      (ios_base::in | ios_base::app) == m)
@@ -818,10 +834,10 @@ namespace irods::experimental::io::s3_transport
                 download_to_cache_ = true;
                 use_cache_ = true;
                 object_must_exist_ = false;
-                return O_CREAT | O_RDWR | O_APPEND;
+                //return O_CREAT | O_RDWR | O_APPEND;
             }
 
-            return translation_error;
+            //return translation_error;
         }  // end populate_mode_flags
 
         bool seek_to_end_if_required(std::ios_base::openmode _mode)
@@ -846,12 +862,15 @@ namespace irods::experimental::io::s3_transport
 
             if (config_.debug_flag) {
                 printf("%s:%d (%s) [[%u]] [_mode & in = %d][_mode & out = %d]"
-                    "[_mode & trunc = %d][_mode & app = %d]\n",
+                    "[_mode & trunc = %d][_mode & app = %d][_mode & ate = %d]"
+                    "[_mode & binary = %d]\n",
                     __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(),
                     (_mode & std::ios_base::in) == std::ios_base::in,
                     (_mode & std::ios_base::out) == std::ios_base::out,
                     (_mode & std::ios_base::trunc) == std::ios_base::trunc,
-                    (_mode & std::ios_base::app) == std::ios_base::out);
+                    (_mode & std::ios_base::app) == std::ios_base::out,
+                    (_mode & std::ios_base::ate) == std::ios_base::ate,
+                    (_mode & std::ios_base::binary) == std::ios_base::binary);
             }
 
             object_key_ = _p.string();
@@ -863,24 +882,23 @@ namespace irods::experimental::io::s3_transport
 
             mode_ = _mode;
 
-            int open_flags = populate_open_mode_flags();
+            //int open_flags = populate_open_mode_flags();
+            populate_open_mode_flags();
 
-            if (open_flags == translation_error) {
+            /*if (open_flags == translation_error) {
                 printf("%s:%d (%s) [[%u]] Invalid open mode detected.\n",
                         __FILE__, __LINE__, __FUNCTION__, get_thread_identifier());
                 return false;
-            }
+            }*/
 
             if (config_.debug_flag) {
-                printf("%s:%d (%s) [[%u]] [object_key_ = %s][config_.multipart_flag = %d][use_cache_ = %d]"
-                    "[download_to_cache_ = %d][O_WRONLY = %d][O_RDONLY = %d]\n",
+                printf("%s:%d (%s) [[%u]] [object_key_ = %s][config_.multipart_upload_flag = %d][use_cache_ = %d]"
+                    "[download_to_cache_ = %d]\n",
                     __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(),
                     object_key_.c_str(),
-                    config_.multipart_flag,
+                    config_.multipart_upload_flag,
                     use_cache_,
-                    download_to_cache_,
-                    (open_flags & O_ACCMODE) == O_WRONLY,
-                    (open_flags & O_ACCMODE) == O_RDONLY);
+                    download_to_cache_);
             }
 
             // each process must intitialize S3
@@ -940,30 +958,27 @@ namespace irods::experimental::io::s3_transport
                 }
             }
 
-            if ( is_full_upload(open_flags) ) {
+            if ( is_full_upload() && config_.multipart_upload_flag ) {
 
-                // this is a full file upload - do not use cache
-
-                if ( is_full_multipart_upload(open_flags) ) {
-
-                    bool multipart_upload_success = begin_multipart_upload(shm_obj, file_open_counter);
-                    if (!multipart_upload_success) {
-                        // TODO test this
-                        fprintf(stderr, "Initiate multipart failed.\n");
-                        critical_error_encountered_ = true;
-                        return false;
-                    }
-
-                } else {
-                    // this is a full file write - do not use cache
-                    // nothing to be done on open() in this case
+                bool multipart_upload_success = begin_multipart_upload(shm_obj, file_open_counter);
+                if (!multipart_upload_success) {
+                    // TODO test this
+                    fprintf(stderr, "Initiate multipart failed.\n");
+                    critical_error_encountered_ = true;
+                    return false;
                 }
-            } else if (open_flags == O_RDONLY) {
-
-                // this is read only - do not use cache
-                // nothing to be done on open() in this case
-
             }
+
+            // if another thread started a multipart upload then we should
+            // not use cache
+            /*std::string upload_id = shm_obj.exec([](auto& data) {
+                    return std::string(data.upload_id);
+                });
+
+            if ("" != upload_id) {
+                use_cache_ = false;
+            }*/
+
 
             if (use_cache_) {
 
@@ -978,14 +993,13 @@ namespace irods::experimental::io::s3_transport
                     try {
                         boost::filesystem::create_directories(parent_path);
                     } catch (boost::filesystem::filesystem_error& e) {
-                        fprintf(stderr, "%s:%d (%s) [[%u]] Could not parent directories for cache file.  %s\n",
+                        fprintf(stderr, "%s:%d (%s) [[%u]] Could not create parent directories for cache file.  %s\n",
                                 __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(), e.what());
                         return false;
                     }
 
                     cache_file_path_ = cache_file.string();
-                    cache_fstream_.open(cache_file_path_.c_str(),
-                            std::ios_base::in | std::ios_base::out | _mode);
+                    cache_fstream_.open(cache_file_path_.c_str(), mode_ | std::ios_base::in | std::ios_base::out);
 
                     if (!cache_fstream_ || !cache_fstream_.is_open()) {
                         fprintf(stderr, "%s:%d (%s) [[%u]] Failed to open cache file.\n",
@@ -1019,7 +1033,6 @@ namespace irods::experimental::io::s3_transport
                     return false;
                 }
             }
-
 
             return true;
 
