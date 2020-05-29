@@ -71,7 +71,7 @@ namespace irods::experimental::io::s3_transport
             , s3_sts_date_str{"amz"}
             , cache_directory{"/tmp"}
             , debug_flag{false}
-            , circular_buffer_size{1}
+            , circular_buffer_size{10}
         {}
 
         uint64_t     object_size;
