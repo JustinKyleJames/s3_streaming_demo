@@ -798,43 +798,36 @@ namespace irods::experimental::io::s3_transport
                 download_to_cache_ = false;
                 use_cache_ = false;
                 object_must_exist_ = true;
-                //return O_RDONLY;
             }
             else if (ios_base::out == m && config_.multipart_upload_flag) {
                 download_to_cache_ = false;
                 use_cache_ = false;
                 object_must_exist_ = false;
-                //return O_CREAT | O_WRONLY | O_TRUNC;
             }
             else if (ios_base::out == m) {
-                download_to_cache_ = true;
-                use_cache_ = true;
+                download_to_cache_ = true;     // if object does not exist use_cache_
+                use_cache_ = true;             // and use_cache_ will be updated to false
                 object_must_exist_ = false;
-                //return O_CREAT | O_WRONLY;
             }
             else if ((ios_base::out | ios_base::trunc) == m) {
                 download_to_cache_ = false;
                 use_cache_ = false;
                 object_must_exist_ = false;
-                //return O_CREAT | O_WRONLY | O_TRUNC;
             }
             else if (ios_base::app == m || (ios_base::out | ios_base::app) == m) {
                 download_to_cache_ = true;
                 use_cache_ = true;
                 object_must_exist_ = false;
-                //return O_CREAT | O_WRONLY | O_APPEND;
             }
             else if ((ios_base::out | ios_base::in) == m) {
                 download_to_cache_ = true;
                 use_cache_ = true;
                 object_must_exist_ = true;
-                //return O_RDWR;
             }
             else if ((ios_base::out | ios_base::in | ios_base::trunc) == m) {
                 download_to_cache_ = false;
                 use_cache_ = true;
                 object_must_exist_ = false;
-                //return O_CREAT | O_RDWR | O_TRUNC;
             }
             else if ((ios_base::out | ios_base::in | ios_base::app) == m ||
                      (ios_base::in | ios_base::app) == m)
@@ -842,10 +835,8 @@ namespace irods::experimental::io::s3_transport
                 download_to_cache_ = true;
                 use_cache_ = true;
                 object_must_exist_ = false;
-                //return O_CREAT | O_RDWR | O_APPEND;
             }
 
-            //return translation_error;
         }  // end populate_mode_flags
 
         bool seek_to_end_if_required(std::ios_base::openmode _mode)
@@ -934,8 +925,9 @@ namespace irods::experimental::io::s3_transport
 
             if (object_must_exist_ || download_to_cache_) {
                 object_exists = object_exists_in_s3(s3_object_size);
-                if (!object_must_exist !object_exists) {
+                if (std::ios_base::out == mode_ && !object_exists) {
                     download_to_cache_ = false;
+                    use_cache_ = false;
                 }
             }
 
