@@ -71,6 +71,7 @@ namespace irods::experimental::io::s3_transport
             , s3_sts_date_str{"amz"}
             , cache_directory{"/tmp"}
             , debug_flag{false}
+            , circular_buffer_size{1}
         {}
 
         uint64_t     object_size;
@@ -92,6 +93,7 @@ namespace irods::experimental::io::s3_transport
         std::string  s3_sts_date_str;
         std::string  cache_directory;
         bool         debug_flag;
+        unsigned int circular_buffer_size;
     };
 
     template <typename CharT>
@@ -135,7 +137,7 @@ namespace irods::experimental::io::s3_transport
             , call_s3_upload_part_flag_{true}
             , call_s3_download_part_flag_{true}
             , begin_part_upload_thread_ptr_{nullptr}
-            , circular_buffer_{1}
+            , circular_buffer_{_config.circular_buffer_size}
             , mode_{0}
             , file_offset_{0}
             , download_to_cache_{false}
@@ -658,6 +660,8 @@ namespace irods::experimental::io::s3_transport
                     threads.join();
 
                     if (bytes_downloaded != s3_object_size) {
+                        fprintf(stderr, "%s:%d (%s) [[%u]] Failed downloading to cache - bytes_downloaded (%lu) != s3_object_size (%lu).\n",
+                                __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(), bytes_downloaded, s3_object_size);
                         return shm_obj.atomic_exec([](auto& data) {
                             return data.cache_file_download_progress = cache_file_download_status::FAILED;
                         });
@@ -771,8 +775,12 @@ namespace irods::experimental::io::s3_transport
         // This populates the following flags based on the open mode (mode_).
         //   - download_to_cache_ - Set to true iff:
         //                             * the object is open for writing (optionally reading)
-        //                               and the object is not being truncated and the multipart_upload_flag
-        //                               is not set
+        //                               and the object is not being truncated and the multipart_upload flag is
+        //                               set.
+        //
+        //                               Note:  If the object is open for writing, not being truncated, but the file
+        //                                      does not exist then this will be set to false.
+        //
         //   - use_cache_         - Set to true iff one of the following applies:
         //                             * download_to_cache_ is true
         //                             * open for reading and writing with the truncate flag
@@ -926,6 +934,9 @@ namespace irods::experimental::io::s3_transport
 
             if (object_must_exist_ || download_to_cache_) {
                 object_exists = object_exists_in_s3(s3_object_size);
+                if (!object_must_exist !object_exists) {
+                    download_to_cache_ = false;
+                }
             }
 
             if (object_must_exist_ && !object_exists) {
@@ -954,6 +965,7 @@ namespace irods::experimental::io::s3_transport
                 cache_file_download_status download_status = download_object_to_cache(shm_obj, s3_object_size);
 
                 if (cache_file_download_status::SUCCESS != download_status) {
+                        fprintf(stderr, "failed to download file to cache, download_status =%d\n", download_status);
                     return false;
                 }
             }
@@ -962,7 +974,6 @@ namespace irods::experimental::io::s3_transport
 
                 bool multipart_upload_success = begin_multipart_upload(shm_obj, file_open_counter);
                 if (!multipart_upload_success) {
-                    // TODO test this
                     fprintf(stderr, "Initiate multipart failed.\n");
                     critical_error_encountered_ = true;
                     return false;
@@ -1012,7 +1023,6 @@ namespace irods::experimental::io::s3_transport
                         critical_error_encountered_ = true;
                         return false;
                     }
-
                 }
 
             } else {
