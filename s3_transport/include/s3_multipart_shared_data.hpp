@@ -51,6 +51,7 @@ namespace irods::experimental::io::s3_transport::shared_data
 
         void reset_fields()
         {
+            file_open_counter = 0;
             upload_id = "";
             etags.clear();
             last_error_code = error_codes::SUCCESS;
@@ -61,7 +62,7 @@ namespace irods::experimental::io::s3_transport::shared_data
             // instead just build a new object in place on top of old
             new (&file_open_close_mutex) interprocess_recursive_mutex(); // in with the new!
 
-            boost::interprocess::scoped_lock lock(file_open_close_mutex);
+            //boost::interprocess::scoped_lock lock(file_open_close_mutex);
         }
 
         int                                   file_open_counter;

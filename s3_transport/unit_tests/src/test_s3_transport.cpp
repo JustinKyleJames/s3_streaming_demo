@@ -199,6 +199,7 @@ void upload_part(const char* const hostname,
     ifs.read((char*)(current_buffer), current_buffer_size);
 
     s3_transport_config s3_config;
+    s3_config.hostname = hostname;
     s3_config.object_size = file_size;
     s3_config.number_of_transfer_threads = thread_count;
     s3_config.part_size = current_buffer_size;
@@ -279,6 +280,7 @@ void download_part(const char* const hostname,
     char *current_buffer = static_cast<char*>(malloc(current_buffer_size * sizeof(char)));
 
     s3_transport_config s3_config;
+    s3_config.hostname = hostname;
     s3_config.object_size = file_size;
     s3_config.number_of_transfer_threads = 20;
     s3_config.part_size = 0;
@@ -345,6 +347,7 @@ void read_write_on_file(const char *hostname,
     }
 
     s3_transport_config s3_config;
+    s3_config.hostname = hostname;
     s3_config.number_of_transfer_threads = thread_count;
     s3_config.part_size = 0;
     s3_config.bucket_name = bucket_name;
