@@ -95,7 +95,7 @@ namespace irods::experimental::io::s3_transport
         {
         }
 
-        libs3_types::bucket_context           saved_bucket_context;             /* To enable more detailed error messages */
+        libs3_types::bucket_context& saved_bucket_context;             /* To enable more detailed error messages */
 
         /* Below used for the upload completion command, need to send in XML */
         std::string              xml;

@@ -66,7 +66,9 @@ namespace irods::experimental::io::s3_transport
         pStatus = status;
         if( debug_flag || status != libs3_types::status_ok ) {
             printf( "  libs3_types::status: [%s] - %d\n", S3_get_status_name( status ), static_cast<int>(status) );
-            printf( "    S3Host: %s\n", saved_bucket_context.hostName );
+            if (saved_bucket_context.hostName) {
+                printf( "    S3Host: %s\n", saved_bucket_context.hostName );
+            }
         }
 
         if (debug_flag || status != libs3_types::status_ok)
@@ -258,7 +260,7 @@ namespace irods::experimental::io::s3_transport
 
 
 
-    } // end namespace s3_multipart_upload
+    } // end namespace s3_upload
 
     namespace s3_multipart_upload
     {

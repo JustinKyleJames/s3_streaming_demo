@@ -143,9 +143,9 @@ namespace irods::experimental::io::s3_transport
             , download_to_cache_{false}
             , use_cache_{false}
             , object_must_exist_{false}
-            , upload_manager_{bucket_context_}
             , put_props_{}
             , bucket_context_{}
+            , upload_manager_{bucket_context_}
             , critical_error_encountered_{false}
         {
 
@@ -1518,7 +1518,6 @@ namespace irods::experimental::io::s3_transport
             write_callback->enable_md5 = config_.enable_md5_flag;
             write_callback->server_encrypt = config_.server_encrypt_flag;
             write_callback->thread_identifier = get_thread_identifier();
-            write_callback->thread_identifier = get_thread_identifier();
             write_callback->object_key = object_key_;
             write_callback->shmem_key = shmem_key_;
             write_callback->shared_memory_timeout_in_seconds = config_.shared_memory_timeout_in_seconds;
@@ -1723,9 +1722,9 @@ namespace irods::experimental::io::s3_transport
         bool                         use_cache_;
         bool                         object_must_exist_;
 
-        upload_manager               upload_manager_;
         S3PutProperties              put_props_;
         libs3_types::bucket_context  bucket_context_;
+        upload_manager               upload_manager_;
 
         bool                         critical_error_encountered_;
 
