@@ -1,6 +1,8 @@
 #include "catch.hpp"
 
 #include "s3_transport.hpp"
+#include "s3_transport_util.hpp"
+#include "s3_multipart_shared_data.hpp"
 #include <filesystem/filesystem.hpp>
 #include <dstream.hpp>
 #include <mutex>
@@ -208,7 +210,7 @@ void upload_part(const char* const hostname,
     s3_config.secret_access_key = secret_access_key;
     s3_config.debug_flag = true;
     s3_config.multipart_upload_flag = multipart_flag;
-    s3_config.shared_memory_timeout_in_seconds = 60;
+    s3_config.shared_memory_timeout_in_seconds = 10;
     s3_config.s3_signature_version_str = s3_signature_version_str;
     s3_config.s3_protocol_str = s3_protocol_str;
     s3_config.s3_sts_date_str = s3_sts_date_str;
@@ -289,7 +291,7 @@ void download_part(const char* const hostname,
     s3_config.secret_access_key = secret_access_key;
     s3_config.debug_flag = false;
     s3_config.multipart_upload_flag = false;
-    s3_config.shared_memory_timeout_in_seconds = 60;
+    s3_config.shared_memory_timeout_in_seconds = 10;
 
     s3_transport tp1{s3_config};
 
@@ -355,7 +357,7 @@ void read_write_on_file(const char *hostname,
     s3_config.secret_access_key = secret_access_key;
     s3_config.debug_flag = true;
     s3_config.multipart_upload_flag = false;
-    s3_config.shared_memory_timeout_in_seconds = 60;
+    s3_config.shared_memory_timeout_in_seconds = 10;
 
     s3_transport tp1{s3_config};
     dstream ds1{tp1, std::string(object_prefix)+filename, open_modes};
@@ -626,6 +628,85 @@ TEST_CASE("quick test", "[quick_test]")
 
     SECTION("upload large file with multiple threads")
     {
+        int thread_count = 7;
+        std::string filename = "large_file";
+        std::string object_prefix = "dir1/dir2/";
+        do_upload_thread(bucket_name, filename, object_prefix, keyfile, thread_count);
+    }
+}
+
+/*TEST_CASE("shmem tests", "[shmem]")
+{
+
+    SECTION("test shmem with named mutex already locked")
+    {
+        using constants = irods::experimental::io::s3_transport::constants;
+        namespace bi = boost::interprocess;
+
+        // lock the named mutex and leave locked, will time out and shmem will be
+        // created succcessfully
+        std::string object_key = "dir1/dir2/large_file";
+        std::string shmem_key = constants::SHARED_MEMORY_KEY_PREFIX +
+                std::to_string(std::hash<std::string>{}(object_key));
+
+        bi::named_mutex mutex(bi::open_or_create, shmem_key.c_str());
+        mutex.lock();
+
+        int thread_count = 7;
+        std::string filename = "large_file";
+        std::string object_prefix = "dir1/dir2/";
+        do_upload_thread(bucket_name, filename, object_prefix, keyfile, thread_count);
+    }
+}*/
+
+TEST_CASE("shmem tests 2", "[shmem2]")
+{
+
+    SECTION("test shmem with internal lock locked")
+    {
+        namespace bi = boost::interprocess;
+        namespace bc = boost::container;
+
+        using segment_manager       = bi::managed_shared_memory::segment_manager;
+        using void_allocator        = bc::scoped_allocator_adaptor<bi::allocator<void, segment_manager>>;
+
+        using constants = irods::experimental::io::s3_transport::constants;
+
+        // recreate the structure that is used in the managed shared_memory_object
+
+        const std::string SHARED_DATA_NAME{"SharedData"};
+        struct ipc_object
+        {
+            ipc_object(void_allocator&& alloc_inst, time_t access_time)
+                : thing(alloc_inst)
+                , last_access_time_in_seconds(access_time)
+            {}
+
+            io::s3_transport::shared_data::multipart_shared_data thing;
+
+            time_t last_access_time_in_seconds;
+            bi::interprocess_recursive_mutex access_mutex;
+
+        };
+
+        std::string object_key = "dir1/dir2/large_file";
+        std::string shmem_key = constants::SHARED_MEMORY_KEY_PREFIX +
+                std::to_string(std::hash<std::string>{}(object_key));
+
+        const time_t now = time(0);
+        bi::managed_shared_memory shm{bi::open_or_create, shmem_key.c_str(), constants::MAX_S3_SHMEM_SIZE};
+        ipc_object *object = shm.find_or_construct<ipc_object>(SHARED_DATA_NAME.c_str())
+                        (  static_cast<void_allocator>(shm.get_segment_manager()), now);
+
+
+        // set some inconsistent state in the object in shared memory
+        // including leaving the interprocess recursive mutex locked
+        // set access time to a value that is considered expired
+        (object->thing.ref_count)++;
+        (object->thing.file_open_counter)++;
+        object->access_mutex.lock();
+        object->last_access_time_in_seconds = now - 20;
+
         int thread_count = 7;
         std::string filename = "large_file";
         std::string object_prefix = "dir1/dir2/";

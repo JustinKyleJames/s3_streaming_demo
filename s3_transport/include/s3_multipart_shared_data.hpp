@@ -58,11 +58,10 @@ namespace irods::experimental::io::s3_transport::shared_data
             cache_file_download_progress = cache_file_download_status::NOT_STARTED;
             ref_count = 1;   // current object has reference so ref_count = 1
 
-            // we need to unlock the mutex but there is no way to force it
-            // instead just build a new object in place on top of old
-            new (&file_open_close_mutex) interprocess_recursive_mutex(); // in with the new!
+        }
 
-            //boost::interprocess::scoped_lock lock(file_open_close_mutex);
+        bool can_delete() {
+            return file_open_counter == 0;
         }
 
         int                                   file_open_counter;
@@ -71,8 +70,6 @@ namespace irods::experimental::io::s3_transport::shared_data
         error_codes                           last_error_code;
         cache_file_download_status            cache_file_download_progress;
         int                                   ref_count;
-
-        interprocess_recursive_mutex          file_open_close_mutex;
 
     };
 

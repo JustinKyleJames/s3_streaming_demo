@@ -35,7 +35,7 @@ namespace irods::experimental::interprocess
                     , last_access_time_in_seconds(access_time)
                 {}
 
-                // T must have reset_fields() and ref_count
+                // T must have reset_fields() and ref_count and can_delete()
                 T thing;
 
                 time_t last_access_time_in_seconds;
@@ -63,35 +63,64 @@ namespace irods::experimental::interprocess
             {
                 const time_t now = time(0);
 
+                bi::named_mutex create_delete_reset_mutex(bi::open_or_create, shm_name_.c_str());
+                bi::scoped_lock lk{create_delete_reset_mutex};
+
                 object_ = shm_.find_or_construct<ipc_object>(SHARED_DATA_NAME.c_str())
                     (  static_cast<void_allocator>(shm_.get_segment_manager()), now,
                        std::forward<Args>(args)...);
 
-                bi::scoped_lock lk{object_->access_mutex};
-
                 (object_->thing.ref_count)++;
-
 
                 const bool shmem_has_expired = now -
                     object_->last_access_time_in_seconds
                     > shared_memory_timeout_in_seconds;
 
                 if (shmem_has_expired) {
-                    object_->thing.reset_fields();
+
+                    // rebuild shmem object
+                    shm_.destroy<ipc_object>(SHARED_DATA_NAME.c_str());
+                    object_ = shm_.find_or_construct<ipc_object>(SHARED_DATA_NAME.c_str())
+                        (  static_cast<void_allocator>(shm_.get_segment_manager()), now,
+                           std::forward<Args>(args)...);
+
+                    //object_->thing.reset_fields();
                 }
                 object_->last_access_time_in_seconds = now;
             }
 
             ~named_shared_memory_object()
             {
-                (object_->thing.ref_count)--;
+                {
+                    bi::named_mutex create_delete_reset_mutex(bi::open_or_create, shm_name_.c_str());
+                    bi::scoped_lock lk{create_delete_reset_mutex};
+
+                    (object_->thing.ref_count)--;
+printf("%s:%d (%s) ref_count=%d\n", __FILE__, __LINE__, __FUNCTION__, object_->thing.ref_count);
+
+                    bool can_delete = object_->thing.can_delete();
+
+                    if (object_->thing.ref_count == 0 && can_delete) {
+
+
+printf("%s:%d (%s) can_delete\n", __FILE__, __LINE__, __FUNCTION__);
+
+                        object_->thing.~T();
+                        object_ = nullptr;
+                        bi::shared_memory_object::remove(shm_name_.c_str());
+                        bi::named_mutex::remove(shm_name_.c_str());
+
+                    }
+                }
             }
 
-            auto remove() -> void
+/*            auto remove() -> void
             {
                 object_->thing.~T();
+                object_ = nullptr;
                 bi::shared_memory_object::remove(shm_name_.c_str());
-            }
+                bi::named_mutex::remove(shm_name_.c_str());
+            }*/
 
             template <typename Function>
             auto atomic_exec(Function _func) const

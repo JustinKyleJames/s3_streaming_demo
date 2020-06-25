@@ -59,6 +59,8 @@ add_compile_options(-nostdinc++ -Wall -Wextra -Werror)
 add_compile_options(-Wno-unused-parameter) # Until fix of irods_re_plugin.hpp
 add_compile_options(-Wno-unneeded-internal-declaration) # Until fix of https://github.com/irods/irods/issues/3396
 
+#add_definitions(-DBOOST_INTERPROCESS_ENABLE_TIMEOUT_WHEN_LOCKING)
+
 link_libraries(c++abi curl xml2 crypto pthread)
 include_directories(${IRODS_EXTERNALS_FULLPATH_CLANG}/include/c++/v1
                     ${IRODS_EXTERNALS_FULLPATH_JSON}/include)

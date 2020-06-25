@@ -557,6 +557,9 @@ namespace irods::experimental::io::s3_transport
                     callback_for_write_to_s3_base *data =
                         (callback_for_write_to_s3_base*)callback_data;
 
+                    // TODO remove
+                    //assert(data->callback_counter < 1000);
+
                     // just touch shmem so we know we are active
                     if (data->callback_counter++ % 10000 == 0) {
                         auto shmem_key =  data->shmem_key;
