@@ -55,10 +55,12 @@ void upload_stage_and_cleanup(const std::string& bucket_name, const std::string&
     std::stringstream ss;
     ss << "aws --endpoint-url http://" << hostname << " s3 rm s3://" << bucket_name
         << "/" << object_prefix << filename;
+printf("%s\n", ss.str().c_str());
     system(ss.str().c_str());
 
     ss.str("");
     ss << filename << ".downloaded";
+printf("rm %s\n", ss.str().c_str());
     remove(ss.str().c_str());
 }
 
@@ -104,12 +106,15 @@ void check_upload_results(const std::string& bucket_name, const std::string& fil
     std::stringstream ss;
     ss << "aws --endpoint-url http://" << hostname << " s3 cp s3://" << bucket_name << "/" << object_prefix
        << filename << " " << filename << ".downloaded";
+
+printf("%s\n", ss.str().c_str());
     int download_return_val = system(ss.str().c_str());
 
     REQUIRE(0 == download_return_val);
 
     ss.str("");
     ss << "cmp -s " << filename << " " << filename << ".downloaded";
+printf("%s\n", ss.str().c_str());
     int cmp_return_val = system(ss.str().c_str());
 
     REQUIRE(0 == cmp_return_val);
@@ -164,7 +169,7 @@ void upload_part(const char* const hostname,
                  const std::string& s3_sts_date_str = "date",
                  bool server_encrypt_flag = false)
 {
-
+printf("open file=%s\n", filename);
     std::ifstream ifs;
     ifs.open(filename, std::ios::in | std::ios::binary | std::ios::ate);
     if (!ifs.good()) {
@@ -210,7 +215,7 @@ void upload_part(const char* const hostname,
     s3_config.secret_access_key = secret_access_key;
     s3_config.debug_flag = true;
     s3_config.multipart_upload_flag = multipart_flag;
-    s3_config.shared_memory_timeout_in_seconds = 10;
+    s3_config.shared_memory_timeout_in_seconds = 20;
     s3_config.s3_signature_version_str = s3_signature_version_str;
     s3_config.s3_protocol_str = s3_protocol_str;
     s3_config.s3_sts_date_str = s3_sts_date_str;
@@ -291,7 +296,7 @@ void download_part(const char* const hostname,
     s3_config.secret_access_key = secret_access_key;
     s3_config.debug_flag = false;
     s3_config.multipart_upload_flag = false;
-    s3_config.shared_memory_timeout_in_seconds = 10;
+    s3_config.shared_memory_timeout_in_seconds = 20;
 
     s3_transport tp1{s3_config};
 
@@ -357,7 +362,7 @@ void read_write_on_file(const char *hostname,
     s3_config.secret_access_key = secret_access_key;
     s3_config.debug_flag = true;
     s3_config.multipart_upload_flag = false;
-    s3_config.shared_memory_timeout_in_seconds = 10;
+    s3_config.shared_memory_timeout_in_seconds = 20;
 
     s3_transport tp1{s3_config};
     dstream ds1{tp1, std::string(object_prefix)+filename, open_modes};
@@ -378,9 +383,9 @@ void read_write_on_file(const char *hostname,
 
         // test offset write from beginning
         write_string = "xxx";
-        ds1.seekg(10, std::ios_base::beg);
+        ds1.seekp(10, std::ios_base::beg);
         ds1.write(write_string.c_str(), write_string.length());
-        fs.seekg(10, std::ios_base::beg);
+        fs.seekp(10, std::ios_base::beg);
         fs.write(write_string.c_str(), write_string.length());
 
         // if appending to file just return
@@ -713,6 +718,18 @@ TEST_CASE("shmem tests 2", "[shmem2]")
         do_upload_thread(bucket_name, filename, object_prefix, keyfile, thread_count);
     }
 }
+
+TEST_CASE("s3_transport_upload_multiple_thread_minimum_part_size", "[upload][thread][minimum_part_size]")
+{
+    SECTION("upload medium file forcing cache due to minimum_part_size")
+    {
+        int thread_count = 10;
+        std::string filename = "medium_file";
+        std::string object_prefix = "dir1/dir2/";
+        do_upload_thread(bucket_name, filename, object_prefix, keyfile, thread_count);
+    }
+}
+
 
 TEST_CASE("s3_transport_upload_multiple_threads", "[upload][thread]")
 {

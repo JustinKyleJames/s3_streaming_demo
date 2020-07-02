@@ -70,7 +70,6 @@ namespace irods::experimental::io::s3_transport::shared_data
         error_codes                           last_error_code;
         cache_file_download_status            cache_file_download_progress;
         int                                   ref_count;
-
     };
 
 }

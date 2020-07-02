@@ -72,6 +72,9 @@ namespace irods::experimental::io::s3_transport
             , cache_directory{"/tmp"}
             , debug_flag{false}
             , circular_buffer_size{10}
+            , s3_uri_request_style{""}
+            , minimum_part_size{DEFAULT_MINIMUM_PART_SIZE}
+
         {}
 
         uint64_t     object_size;
@@ -94,7 +97,10 @@ namespace irods::experimental::io::s3_transport
         std::string  cache_directory;
         bool         debug_flag;
         unsigned int circular_buffer_size;
+        std::string  s3_uri_request_style;
+        uint64_t     minimum_part_size;
         static const uint64_t UNKNOWN_OBJECT_SIZE = 0;  // TODO use a negative number for this
+        static const uint64_t DEFAULT_MINIMUM_PART_SIZE = 5*1024*1024;
     };
 
     template <typename CharT>
@@ -179,7 +185,14 @@ namespace irods::experimental::io::s3_transport
                 bucket_context_.stsDate     = S3STSDateOnly;
             }
 
-            bucket_context_.uriStyle        = S3UriStylePath;
+            if (boost::iequals(_config.s3_uri_request_style, "virtual") ||
+                    boost::iequals(_config.s3_uri_request_style, "host") ||
+                    boost::iequals(_config.s3_uri_request_style, "virtualhost")) {
+
+                bucket_context_.uriStyle    = S3UriStyleVirtualHost;
+            } else {
+                bucket_context_.uriStyle    = S3UriStylePath;
+            }
 
         }
 
@@ -275,9 +288,14 @@ namespace irods::experimental::io::s3_transport
 
             fd_ = uninitialized_file_descriptor;
 
-            populate_open_mode_flags();
+            //populate_open_mode_flags();
 
-            if ( is_full_upload() && config_.multipart_upload_flag ) {
+            // if the part size < minimum part size we use cache
+            //if (config_.part_size < config_.minimum_part_size) {
+            //    use_cache_ = true;
+            //}
+
+            if ( !use_cache_ && is_full_upload() && config_.multipart_upload_flag ) {
 
                 // This was a full multipart upload, wait for the upload to complete
 
@@ -302,9 +320,15 @@ namespace irods::experimental::io::s3_transport
                 config_.shared_memory_timeout_in_seconds,
                 constants::MAX_S3_SHMEM_SIZE};
 
+            enum struct additional_processing_enum {
+                CONTINUE,
+                DO_FLUSH_CACHE_FILE
+            };
+
             // only allow one open/close to happen at a time
-            shm_obj.atomic_exec([this, &shm_obj, &return_value](auto& data)
+            auto result = shm_obj.atomic_exec([this, &return_value](auto& data) -> additional_processing_enum
             {
+                additional_processing_enum rv = additional_processing_enum::CONTINUE;
 
                 // do close processing if # files open = 0
                 //  - for multipart upload send the complete message
@@ -331,11 +355,8 @@ namespace irods::experimental::io::s3_transport
 
                     if (this->use_cache_) {
 
-                        if (error_codes::SUCCESS != this->flush_cache_file(shm_obj)) {
-                            fprintf(stderr, "%s:%d (%s) [[%u]] flush_cache_file returned error\n",
-                                    __FILE__, __LINE__, __FUNCTION__, this->get_thread_identifier());
-                            return_value = false;
-                        }
+                        rv = additional_processing_enum::DO_FLUSH_CACHE_FILE;
+
 
                     } else {
 
@@ -353,17 +374,18 @@ namespace irods::experimental::io::s3_transport
 
                 }
 
+                return rv;
+
             }); // end close lock
 
-            /*int shm_obj_ref_count = shm_obj.atomic_exec([](auto& data)
-            {
-                return data.ref_count;
+            if (result == additional_processing_enum::DO_FLUSH_CACHE_FILE) {
 
-            });*/
-
-            /*if (last_file_to_close && shm_obj_ref_count == 1) {
-                shm_obj.remove();
-            }*/
+                if (error_codes::SUCCESS != flush_cache_file(shm_obj)) {
+                    fprintf(stderr, "%s:%d (%s) [[%u]] flush_cache_file returned error\n",
+                            __FILE__, __LINE__, __FUNCTION__, this->get_thread_identifier());
+                    return_value = false;
+                }
+            }
 
             return return_value;
         }
@@ -397,19 +419,26 @@ namespace irods::experimental::io::s3_transport
                 return 0;
             }*/
 
+
+            thread_local std::ofstream tmp;
+
             if (use_cache_) {
-                auto position_before_write = cache_fstream_.tellp();
-                cache_fstream_.write(_buffer, _buffer_size);
 
-                // calculate the new size of the file
-                auto current_position = cache_fstream_.tellp();
-                cache_fstream_.seekp(0, std::ios_base::end);
+                named_shared_memory_object shm_obj{shmem_key_,
+                    config_.shared_memory_timeout_in_seconds,
+                    constants::MAX_S3_SHMEM_SIZE};
 
-                // seek back to current position
-                cache_fstream_.seekp(current_position, std::ios_base::beg);
+                return shm_obj.atomic_exec([this, _buffer, _buffer_size](auto& data) {
 
-                // return bytes written
-                return current_position - position_before_write;
+                    auto position_before_write = this->cache_fstream_.tellp();
+                    this->cache_fstream_.write(_buffer, _buffer_size);
+
+                    // calculate the new size of the file
+                    auto current_position = this->cache_fstream_.tellp();
+
+                    // return bytes written
+                    return current_position - position_before_write;
+                });
             }
 
             // Not using cache.
@@ -611,67 +640,53 @@ namespace irods::experimental::io::s3_transport
                 uint64_t bytes_downloaded = 0;
                 std::mutex bytes_downloaded_mutex;
 
-                // each part must be at least 5MB in size
-                uint64_t minimum_part_size = 5 * 1024 * 1024;
-                unsigned int number_of_transfer_threads
-                    = minimum_part_size * config_.number_of_transfer_threads < s3_object_size
-                    ? config_.number_of_transfer_threads
-                    : s3_object_size / minimum_part_size == 0 ? 1 : s3_object_size / minimum_part_size;
+                uint64_t part_size = s3_object_size / config_.number_of_transfer_threads;
 
-                uint64_t part_size = s3_object_size / number_of_transfer_threads;
+                irods::thread_pool threads{static_cast<int>(config_.number_of_transfer_threads)};
 
-                {
-                    irods::thread_pool threads{static_cast<int>(number_of_transfer_threads)};
+                for (unsigned int thr_id= 0; thr_id < config_.number_of_transfer_threads; ++thr_id) {
 
-                    for (unsigned int thr_id= 0; thr_id < number_of_transfer_threads; ++thr_id) {
+                    irods::thread_pool::post(threads, [this, thr_id, part_size, s3_object_size,
+                            &bytes_downloaded, &bytes_downloaded_mutex] () {
 
-                        irods::thread_pool::post(threads, [this, thr_id, part_size, s3_object_size,
-                                &bytes_downloaded, &bytes_downloaded_mutex] () {
+                            off_t this_part_offset = part_size * thr_id;
+                            uint64_t this_part_size;
 
-                                off_t this_part_offset = part_size * thr_id;
-                                uint64_t this_part_size;
+                            if (thr_id == config_.number_of_transfer_threads - 1) {
+                                this_part_size = part_size + (s3_object_size -
+                                        part_size * config_.number_of_transfer_threads);
+                            } else {
+                                this_part_size = part_size;
+                            }
 
-                                if (thr_id == config_.number_of_transfer_threads - 1) {
-                                    this_part_size = part_size + (s3_object_size -
-                                            part_size * config_.number_of_transfer_threads);
-                                } else {
-                                    this_part_size = part_size;
-                                }
+                            uint64_t this_bytes_downloaded =
+                                this->s3_download_part_worker_routine(nullptr, this_part_size, this_part_offset);
 
-                                uint64_t this_bytes_downloaded =
-                                    this->s3_download_part_worker_routine(nullptr, this_part_size, this_part_offset);
+                            {
+                                std::lock_guard<std::mutex> lock(bytes_downloaded_mutex);
+                                bytes_downloaded += this_bytes_downloaded;
+                            }
+                    });
+                }
+                threads.join();
 
-                                {
-                                    std::lock_guard<std::mutex> lock(bytes_downloaded_mutex);
-                                    bytes_downloaded += this_bytes_downloaded;
-                                }
-                        });
-                    }
-                    threads.join();
-
-                    if (bytes_downloaded != s3_object_size) {
-                        fprintf(stderr, "%s:%d (%s) [[%u]] Failed downloading to cache - bytes_downloaded (%lu) != s3_object_size (%lu).\n",
-                                __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(), bytes_downloaded, s3_object_size);
-                        return shm_obj.exec([](auto& data) {
-                            return data.cache_file_download_progress = cache_file_download_status::FAILED;
-                        });
-                    }
+                if (bytes_downloaded != s3_object_size) {
+                    fprintf(stderr, "%s:%d (%s) [[%u]] Failed downloading to cache - bytes_downloaded (%lu) != s3_object_size (%lu).\n",
+                            __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(), bytes_downloaded, s3_object_size);
+                    fflush(stderr);
+                    return shm_obj.exec([](auto& data) {
+                        return data.cache_file_download_progress = cache_file_download_status::FAILED;
+                    });
                 }
 
                 return shm_obj.exec([](auto& data) {
+
 
                     data.cache_file_download_progress = cache_file_download_status::SUCCESS;
                     return data.cache_file_download_progress;
                 });
 
             }
-
-            /* // this is no longer required since this can only run one thread at a time
-            while ((shm_obj.atomic_exec([](auto& data) {
-                      return data.cache_file_download_progress == cache_file_download_status::STARTED;
-                  }))) {
-                sleep(1);
-            }*/
 
             // check the download status and return
             return shm_obj.atomic_exec([](auto& data) { return data.cache_file_download_progress; });
@@ -694,7 +709,6 @@ namespace irods::experimental::io::s3_transport
             bf::path cache_file =  bf::path(config_.cache_directory) / bf::path(object_key_ + "-cache");
             cache_file_path_ = cache_file.string();
 
-
             // calculate the part size
             std::ifstream ifs;
             ifs.open(cache_file_path_.c_str(), std::ios::out);
@@ -708,22 +722,22 @@ namespace irods::experimental::io::s3_transport
             uint64_t cache_file_size = static_cast<uint64_t>(ifs.tellg());
             ifs.close();
 
-            // each part must be at least 5MB in size
-            uint64_t minimum_part_size = 5 * 1024 * 1024;
-            int number_of_transfer_threads
+            // each part must be at least 5MB in size so adjust number_of_transfer_threads accordingly
+            uint64_t minimum_part_size = config_.minimum_part_size;
+            config_.number_of_transfer_threads
                 = minimum_part_size * config_.number_of_transfer_threads < cache_file_size
                 ? config_.number_of_transfer_threads
                 : cache_file_size / minimum_part_size == 0 ? 1 : cache_file_size / minimum_part_size;
 
             uint64_t part_size = cache_file_size / config_.number_of_transfer_threads;
 
-            if (config_.multipart_upload_flag && number_of_transfer_threads > 1) {
+            if (config_.multipart_upload_flag && config_.number_of_transfer_threads > 1) {
 
                 initiate_multipart_upload();
 
-                irods::thread_pool cache_flush_threads{number_of_transfer_threads};
+                irods::thread_pool cache_flush_threads{static_cast<int>(config_.number_of_transfer_threads)};
 
-                for (int thr_id= 0; thr_id < number_of_transfer_threads; ++thr_id) {
+                for (unsigned int thr_id= 0; thr_id < config_.number_of_transfer_threads; ++thr_id) {
 
                         irods::thread_pool::post(cache_flush_threads, [this, thr_id, part_size] () {
                                 // upload part and read your part from cache file
@@ -741,7 +755,7 @@ namespace irods::experimental::io::s3_transport
             }
 
             // remove cache file
-            //std::remove(cache_file_path_.c_str());
+            std::remove(cache_file_path_.c_str());
 
             // set cache file download flag to NOT_STARTED
             // already locked so just exec()
@@ -872,14 +886,12 @@ namespace irods::experimental::io::s3_transport
 
             mode_ = _mode;
 
-            //int open_flags = populate_open_mode_flags();
             populate_open_mode_flags();
 
-            /*if (open_flags == translation_error) {
-                printf("%s:%d (%s) [[%u]] Invalid open mode detected.\n",
-                        __FILE__, __LINE__, __FUNCTION__, get_thread_identifier());
-                return false;
-            }*/
+            // if opening for writing the part size < minimum part size, for now stream from s3
+            if (config_.multipart_upload_flag && config_.part_size < config_.minimum_part_size) {
+                use_cache_ = true;
+            }
 
             if (config_.debug_flag) {
                 printf("%s:%d (%s) [[%u]] [object_key_ = %s][config_.multipart_upload_flag = %d][use_cache_ = %d]"
@@ -917,7 +929,10 @@ namespace irods::experimental::io::s3_transport
 
             if (object_must_exist_ || download_to_cache_) {
                 object_exists = object_exists_in_s3(s3_object_size);
-                if (std::ios_base::out == mode_ && !object_exists) {
+
+                // if we are only writing and there is no existing object and our part size is at least
+                // the minimum part size, we do not have to use cache
+                if (std::ios_base::out == mode_ && !object_exists && config_.part_size >= config_.minimum_part_size) {
                     download_to_cache_ = false;
                     use_cache_ = false;
                 }
@@ -931,14 +946,6 @@ namespace irods::experimental::io::s3_transport
             named_shared_memory_object shm_obj{shmem_key_,
                 config_.shared_memory_timeout_in_seconds,
                 constants::MAX_S3_SHMEM_SIZE};
-
-            // only allow open/close to run one at a time for this object
-            //bi::interprocess_recursive_mutex* file_open_close_mutex =
-            //    shm_obj.atomic_exec([](auto& data) {
-            //            return &(data.file_open_close_mutex);
-
-            //});
-            //bi::scoped_lock file_open_lock(*file_open_close_mutex);
 
             // only allow open/close to run one at a time for this object
             bool return_value = true;
@@ -956,7 +963,7 @@ namespace irods::experimental::io::s3_transport
                     }
                 }
 
-                if ( this->is_full_upload() && this->config_.multipart_upload_flag ) {
+                if ( !(this->use_cache_) && this->is_full_upload() && this->config_.multipart_upload_flag ) {
 
                     bool multipart_upload_success = this->begin_multipart_upload(shm_obj, data.file_open_counter);
                     if (!multipart_upload_success) {
@@ -985,7 +992,16 @@ namespace irods::experimental::io::s3_transport
                         }
 
                         cache_file_path_ = cache_file.string();
+
+                        // try opening for read and write, if it fails create then open for read/write
                         cache_fstream_.open(cache_file_path_.c_str(), mode_ | std::ios_base::in | std::ios_base::out);
+                        if (!cache_fstream_.is_open()) {
+                            // file may not exist, open with out to create then with in/out
+                            cache_fstream_.open(cache_file_path_.c_str(), mode_ | std::ios_base::out);
+                            cache_fstream_.close();
+                            cache_fstream_.open(cache_file_path_.c_str(), mode_ | std::ios_base::in | std::ios_base::out);
+                        }
+
 
                         if (!cache_fstream_ || !cache_fstream_.is_open()) {
                             fprintf(stderr, "%s:%d (%s) [[%u]] Failed to open cache file.\n",
@@ -1185,7 +1201,6 @@ namespace irods::experimental::io::s3_transport
                             << upload_id << "\"";
                         printf( "%s:%d (%s) [[%u]] %s\n", __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(),
                                 msg.str().c_str() );
-fflush(stdout);
                     }
 
                     uint64_t i;
@@ -1443,7 +1458,7 @@ fflush(stdout);
                 // last thread gets extra bits
                 if (part_number == config_.number_of_transfer_threads - 1) {
                     content_length = part_size + (object_size -
-                            part_size * config_.number_of_transfer_threads);
+                            part_size * config_.number_of_transfer_threads);    // TODO this is not right if number of transfer threads altered
                 } else {
                     content_length = part_size;
                 }

@@ -78,6 +78,8 @@ namespace irods::experimental::interprocess
 
                 if (shmem_has_expired) {
 
+                   printf("%s:%d (%s) SHMEM_HAS_EXPIRED\n", __FILE__, __LINE__, __FUNCTION__);
+
                     // rebuild shmem object
                     shm_.destroy<ipc_object>(SHARED_DATA_NAME.c_str());
                     object_ = shm_.find_or_construct<ipc_object>(SHARED_DATA_NAME.c_str())
@@ -85,6 +87,7 @@ namespace irods::experimental::interprocess
                            std::forward<Args>(args)...);
 
                     //object_->thing.reset_fields();
+                    object_->thing.ref_count = 1;
                 }
                 object_->last_access_time_in_seconds = now;
             }
@@ -96,14 +99,10 @@ namespace irods::experimental::interprocess
                     bi::scoped_lock lk{create_delete_reset_mutex};
 
                     (object_->thing.ref_count)--;
-printf("%s:%d (%s) ref_count=%d\n", __FILE__, __LINE__, __FUNCTION__, object_->thing.ref_count);
 
                     bool can_delete = object_->thing.can_delete();
 
                     if (object_->thing.ref_count == 0 && can_delete) {
-
-
-printf("%s:%d (%s) can_delete\n", __FILE__, __LINE__, __FUNCTION__);
 
                         object_->thing.~T();
                         object_ = nullptr;
@@ -114,7 +113,7 @@ printf("%s:%d (%s) can_delete\n", __FILE__, __LINE__, __FUNCTION__);
                 }
             }
 
-/*            auto remove() -> void
+            /*  auto remove() -> void
             {
                 object_->thing.~T();
                 object_ = nullptr;

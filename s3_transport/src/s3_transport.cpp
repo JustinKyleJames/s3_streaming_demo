@@ -42,7 +42,7 @@ namespace irods::experimental::io::s3_transport
 
     void print_bucket_context(const libs3_types::bucket_context& bucket_context)
     {
-        printf("BucketContext: [hostName=%s] [bucketName=%s][protocol=%d]"
+        rodsLog(LOG_DEBUG, "BucketContext: [hostName=%s] [bucketName=%s][protocol=%d]"
                "[uriStyle=%d][accessKeyId=%s][secretAccessKey=%s]"
                "[securityToken=%s][stsDate=%d]\n",
                bucket_context.hostName == nullptr ? "" : bucket_context.hostName,
@@ -65,25 +65,25 @@ namespace irods::experimental::io::s3_transport
 
         pStatus = status;
         if( debug_flag || status != libs3_types::status_ok ) {
-            printf( "  libs3_types::status: [%s] - %d\n", S3_get_status_name( status ), static_cast<int>(status) );
+            rodsLog(LOG_DEBUG,  "  libs3_types::status: [%s] - %d\n", S3_get_status_name( status ), static_cast<int>(status) );
             if (saved_bucket_context.hostName) {
-                printf( "    S3Host: %s\n", saved_bucket_context.hostName );
+                rodsLog(LOG_DEBUG,  "    S3Host: %s\n", saved_bucket_context.hostName );
             }
         }
 
         if (debug_flag || status != libs3_types::status_ok)
-            printf( "  Function: %s\n", function.c_str() );
+            rodsLog(LOG_DEBUG,  "  Function: %s\n", function.c_str() );
         if (debug_flag && error && error->message)
-            printf( "  Message: %s\n", error->message);
+            rodsLog(LOG_DEBUG,  "  Message: %s\n", error->message);
         if (debug_flag && error && error->resource)
-            printf( "  Resource: %s\n", error->resource);
+            rodsLog(LOG_DEBUG,  "  Resource: %s\n", error->resource);
         if (debug_flag && error && error->furtherDetails)
-            printf( "  Further Details: %s\n", error->furtherDetails);
+            rodsLog(LOG_DEBUG,  "  Further Details: %s\n", error->furtherDetails);
         if (debug_flag && error && error->extraDetailsCount) {
-            printf( "%s", "  Extra Details:\n");
+            rodsLog(LOG_DEBUG,  "%s", "  Extra Details:\n");
 
             for (int i = 0; i < error->extraDetailsCount; i++) {
-                printf( "    %s: %s\n", error->extraDetails[i].name,
+                rodsLog(LOG_DEBUG,  "    %s: %s\n", error->extraDetails[i].name,
                         error->extraDetails[i].value);
             }
         }
@@ -280,11 +280,8 @@ namespace irods::experimental::io::s3_transport
                 // upload upload_id in shared memory
                 upload_manager *manager = (upload_manager *)callback_data;
 
-                // upload upload_id in shared memory
-                // upload upload_id in shared memory
                 std::string& shmem_key = manager->shmem_key;
 
-                // upload upload_id in shared memory
                 named_shared_memory_object shm_obj{shmem_key,
                     manager->shared_memory_timeout_in_seconds,
                     constants::MAX_S3_SHMEM_SIZE};
