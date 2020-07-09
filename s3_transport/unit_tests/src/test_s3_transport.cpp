@@ -30,6 +30,8 @@ std::string keyfile = "/projects/irods/vsphere-testing/externals/amazon_web_serv
 std::string hostname = "s3.amazonaws.com";
 std::string bucket_name = "justinkylejames1";
 
+static int log_level = LOG_ERROR;
+
 void read_keys(const std::string& keyfile, std::string& access_key, std::string& secret_access_key)
 {
     // open and read keyfile
@@ -55,12 +57,12 @@ void upload_stage_and_cleanup(const std::string& bucket_name, const std::string&
     std::stringstream ss;
     ss << "aws --endpoint-url http://" << hostname << " s3 rm s3://" << bucket_name
         << "/" << object_prefix << filename;
-printf("%s\n", ss.str().c_str());
+    rodsLog(LOG_DEBUG, "%s\n", ss.str().c_str());
     system(ss.str().c_str());
 
     ss.str("");
     ss << filename << ".downloaded";
-printf("rm %s\n", ss.str().c_str());
+    rodsLog(LOG_DEBUG, "rm %s\n", ss.str().c_str());
     remove(ss.str().c_str());
 }
 
@@ -107,14 +109,14 @@ void check_upload_results(const std::string& bucket_name, const std::string& fil
     ss << "aws --endpoint-url http://" << hostname << " s3 cp s3://" << bucket_name << "/" << object_prefix
        << filename << " " << filename << ".downloaded";
 
-printf("%s\n", ss.str().c_str());
+    rodsLog(LOG_DEBUG, "%s\n", ss.str().c_str());
     int download_return_val = system(ss.str().c_str());
 
     REQUIRE(0 == download_return_val);
 
     ss.str("");
     ss << "cmp -s " << filename << " " << filename << ".downloaded";
-printf("%s\n", ss.str().c_str());
+    rodsLog(LOG_DEBUG, "%s\n", ss.str().c_str());
     int cmp_return_val = system(ss.str().c_str());
 
     REQUIRE(0 == cmp_return_val);
@@ -169,7 +171,7 @@ void upload_part(const char* const hostname,
                  const std::string& s3_sts_date_str = "date",
                  bool server_encrypt_flag = false)
 {
-printf("open file=%s\n", filename);
+    rodsLog(LOG_DEBUG, "open file=%s\n", filename);
     std::ifstream ifs;
     ifs.open(filename, std::ios::in | std::ios::binary | std::ios::ate);
     if (!ifs.good()) {
@@ -191,7 +193,7 @@ printf("open file=%s\n", filename);
 
     uint64_t current_buffer_size = end - start;
 
-    printf("%s:%d (%s) [[%d]] [file_size=%lu][start=%lu][end=%lu][current_buffer_size=%lu]\n",
+    rodsLog(LOG_DEBUG, "%s:%d (%s) [[%d]] [file_size=%lu][start=%lu][end=%lu][current_buffer_size=%lu]\n",
             __FILE__, __LINE__, __FUNCTION__,
             thread_number, file_size, start, end, current_buffer_size);
 
@@ -213,7 +215,6 @@ printf("open file=%s\n", filename);
     s3_config.bucket_name = bucket_name;
     s3_config.access_key = access_key;
     s3_config.secret_access_key = secret_access_key;
-    s3_config.debug_flag = true;
     s3_config.multipart_upload_flag = multipart_flag;
     s3_config.shared_memory_timeout_in_seconds = 20;
     s3_config.s3_signature_version_str = s3_signature_version_str;
@@ -279,7 +280,7 @@ void download_part(const char* const hostname,
             std::ios::out | std::ios::binary);
 
     if (!ofs.good()) {
-        fprintf(stderr, "failed to open file %s\n", filename);
+        rodsLog(LOG_ERROR, "failed to open file %s\n", filename);
         return;
     }
 
@@ -294,7 +295,6 @@ void download_part(const char* const hostname,
     s3_config.bucket_name = bucket_name;
     s3_config.access_key = access_key;
     s3_config.secret_access_key = secret_access_key;
-    s3_config.debug_flag = false;
     s3_config.multipart_upload_flag = false;
     s3_config.shared_memory_timeout_in_seconds = 20;
 
@@ -321,11 +321,11 @@ void download_part(const char* const hostname,
     }
     ofs.close();
 
-    printf("READ DONE FOR %d\n", thread_number);
+    rodsLog(LOG_DEBUG, "READ DONE FOR %d\n", thread_number);
 
     // will be automatic
     ds1.close();
-    printf("CLOSE DONE FOR %d\n", thread_number);
+    rodsLog(LOG_DEBUG, "CLOSE DONE FOR %d\n", thread_number);
 
     free(current_buffer);
 
@@ -344,7 +344,7 @@ void read_write_on_file(const char *hostname,
                         std::ios_base::openmode open_modes)
 {
 
-    printf("%s:%d (%s) [[%d]] [open file for read/write]\n",
+    rodsLog(LOG_DEBUG, "%s:%d (%s) [[%d]] [open file for read/write]\n",
             __FILE__, __LINE__, __FUNCTION__, thread_number);
 
     std::fstream fs;
@@ -360,7 +360,6 @@ void read_write_on_file(const char *hostname,
     s3_config.bucket_name = bucket_name;
     s3_config.access_key = access_key;
     s3_config.secret_access_key = secret_access_key;
-    s3_config.debug_flag = true;
     s3_config.multipart_upload_flag = false;
     s3_config.shared_memory_timeout_in_seconds = 20;
 
@@ -392,7 +391,7 @@ void read_write_on_file(const char *hostname,
         if (open_modes & std::ios_base::app) {
             fs.close();
             ds1.close();
-            printf("CLOSE DONE FOR %d\n", thread_number);
+            rodsLog(LOG_DEBUG, "CLOSE DONE FOR %d\n", thread_number);
             return;
         }
 
@@ -435,7 +434,7 @@ void read_write_on_file(const char *hostname,
     std::this_thread::sleep_for(2s);
     // will be automatic
     ds1.close();
-    printf("CLOSE DONE FOR %d\n", thread_number);
+    rodsLog(LOG_DEBUG, "CLOSE DONE FOR %d\n", thread_number);
 }
 
 void do_upload_process(const std::string& bucket_name,
@@ -460,13 +459,13 @@ void do_upload_process(const std::string& bucket_name,
             return;
         }
 
-        printf("%s:%d (%s) [%d] started process %d\n", __FILE__, __LINE__, __FUNCTION__,
+        rodsLog(LOG_DEBUG, "%s:%d (%s) [%d] started process %d\n", __FILE__, __LINE__, __FUNCTION__,
                 getpid(), pid);
     }
 
     int pid;
     while ((pid = wait(nullptr)) > 0) {
-        printf("%s:%d (%s) process %d finished\n", __FILE__, __LINE__, __FUNCTION__, pid);
+        rodsLog(LOG_DEBUG, "%s:%d (%s) process %d finished\n", __FILE__, __LINE__, __FUNCTION__, pid);
     }
 
     check_upload_results(bucket_name, filename, object_prefix);
@@ -493,13 +492,13 @@ void do_download_process(const std::string& bucket_name,
             return;
         }
 
-        printf("%s:%d (%s) [%d] started process %d\n", __FILE__, __LINE__, __FUNCTION__,
+        rodsLog(LOG_DEBUG, "%s:%d (%s) [%d] started process %d\n", __FILE__, __LINE__, __FUNCTION__,
                 getpid(), pid);
     }
 
     int pid;
     while ((pid = wait(nullptr)) > 0) {
-        printf("%s:%d (%s) process %d finished\n", __FILE__, __LINE__, __FUNCTION__, pid);
+        rodsLog(LOG_DEBUG, "%s:%d (%s) process %d finished\n", __FILE__, __LINE__, __FUNCTION__, pid);
     }
 
     check_download_results(bucket_name, filename, object_prefix);
@@ -630,6 +629,7 @@ void do_read_write_thread(const std::string& bucket_name,
 
 TEST_CASE("quick test", "[quick_test]")
 {
+    rodsLogLevel(log_level);
 
     SECTION("upload large file with multiple threads")
     {
@@ -666,6 +666,7 @@ TEST_CASE("quick test", "[quick_test]")
 
 TEST_CASE("shmem tests 2", "[shmem2]")
 {
+    rodsLogLevel(log_level);
 
     SECTION("test shmem with internal lock locked")
     {
@@ -721,6 +722,8 @@ TEST_CASE("shmem tests 2", "[shmem2]")
 
 TEST_CASE("s3_transport_upload_multiple_thread_minimum_part_size", "[upload][thread][minimum_part_size]")
 {
+    rodsLogLevel(log_level);
+
     SECTION("upload medium file forcing cache due to minimum_part_size")
     {
         int thread_count = 10;
@@ -733,6 +736,8 @@ TEST_CASE("s3_transport_upload_multiple_thread_minimum_part_size", "[upload][thr
 
 TEST_CASE("s3_transport_upload_multiple_threads", "[upload][thread]")
 {
+    rodsLogLevel(log_level);
+
     int thread_count = 2;
     std::string filename = "medium_file";
     std::string object_prefix = "dir1/dir2/";
@@ -826,6 +831,8 @@ TEST_CASE("s3_transport_upload_multiple_threads", "[upload][thread]")
 
 TEST_CASE("s3_transport_download_large_multiple_threads", "[download][thread]")
 {
+    rodsLogLevel(log_level);
+
     int thread_count = 2;
     std::string filename = "medium_file";
     std::string object_prefix = "dir1/dir2/";
@@ -871,6 +878,8 @@ TEST_CASE("s3_transport_download_large_multiple_threads", "[download][thread]")
 
 TEST_CASE("s3_transport_upload_large_multiple_processes", "[upload_process][process]")
 {
+    rodsLogLevel(log_level);
+
     int process_count = 8;
     std::string filename = "large_file";
     std::string object_prefix = "dir1/dir2/";
@@ -884,6 +893,8 @@ TEST_CASE("s3_transport_upload_large_multiple_processes", "[upload_process][proc
 
 TEST_CASE("s3_transport_download_large_multiple_processes", "[download_process][process]")
 {
+    rodsLogLevel(log_level);
+
     int process_count = 8;
     std::string filename = "medium_file";
     std::string object_prefix = "dir1/dir2/";
@@ -896,6 +907,8 @@ TEST_CASE("s3_transport_download_large_multiple_processes", "[download_process][
 
 TEST_CASE("s3_transport_readwrite_thread", "[rw][thread]")
 {
+    rodsLogLevel(log_level);
+
     int thread_count = 1;
     std::string filename = "medium_file";
     std::string object_prefix = "dir1/dir2/";

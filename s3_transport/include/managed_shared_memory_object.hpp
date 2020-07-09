@@ -78,7 +78,7 @@ namespace irods::experimental::interprocess
 
                 if (shmem_has_expired) {
 
-                   printf("%s:%d (%s) SHMEM_HAS_EXPIRED\n", __FILE__, __LINE__, __FUNCTION__);
+                   rodsLog(LOG_NOTICE, "%s:%d (%s) SHMEM_HAS_EXPIRED\n", __FILE__, __LINE__, __FUNCTION__);
 
                     // rebuild shmem object
                     shm_.destroy<ipc_object>(SHARED_DATA_NAME.c_str());

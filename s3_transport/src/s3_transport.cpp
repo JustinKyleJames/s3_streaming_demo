@@ -59,32 +59,41 @@ namespace irods::experimental::io::s3_transport
                                const libs3_types::error_details *error,
                                const std::string& function,
                                const libs3_types::bucket_context& saved_bucket_context,
-                               libs3_types::status& pStatus,
-                               bool debug_flag = false )
+                               libs3_types::status& pStatus )
     {
 
+        int log_level = LOG_DEBUG;
+
         pStatus = status;
-        if( debug_flag || status != libs3_types::status_ok ) {
-            rodsLog(LOG_DEBUG,  "  libs3_types::status: [%s] - %d\n", S3_get_status_name( status ), static_cast<int>(status) );
-            if (saved_bucket_context.hostName) {
-                rodsLog(LOG_DEBUG,  "    S3Host: %s\n", saved_bucket_context.hostName );
-            }
+        if(status != libs3_types::status_ok ) {
+            log_level = LOG_ERROR;
         }
 
-        if (debug_flag || status != libs3_types::status_ok)
-            rodsLog(LOG_DEBUG,  "  Function: %s\n", function.c_str() );
-        if (debug_flag && error && error->message)
-            rodsLog(LOG_DEBUG,  "  Message: %s\n", error->message);
-        if (debug_flag && error && error->resource)
-            rodsLog(LOG_DEBUG,  "  Resource: %s\n", error->resource);
-        if (debug_flag && error && error->furtherDetails)
-            rodsLog(LOG_DEBUG,  "  Further Details: %s\n", error->furtherDetails);
-        if (debug_flag && error && error->extraDetailsCount) {
-            rodsLog(LOG_DEBUG,  "%s", "  Extra Details:\n");
+        rodsLog(log_level,  "  libs3_types::status: [%s] - %d\n", S3_get_status_name( status ), static_cast<int>(status) );
+        if (saved_bucket_context.hostName) {
+            rodsLog(log_level,  "    S3Host: %s\n", saved_bucket_context.hostName );
+        }
 
-            for (int i = 0; i < error->extraDetailsCount; i++) {
-                rodsLog(LOG_DEBUG,  "    %s: %s\n", error->extraDetails[i].name,
-                        error->extraDetails[i].value);
+        rodsLog(log_level,  "  Function: %s\n", function.c_str() );
+
+        if (error) {
+
+            if (error->message) {
+                rodsLog(log_level,  "  Message: %s\n", error->message);
+            }
+            if (error->resource) {
+                rodsLog(log_level,  "  Resource: %s\n", error->resource);
+            }
+            if (error->furtherDetails) {
+                rodsLog(log_level,  "  Further Details: %s\n", error->furtherDetails);
+            }
+            if (error->extraDetailsCount) {
+                rodsLog(log_level,  "%s", "  Extra Details:\n");
+
+                for (int i = 0; i < error->extraDetailsCount; i++) {
+                    rodsLog(log_level,  "    %s: %s\n", error->extraDetails[i].name,
+                            error->extraDetails[i].value);
+                }
             }
         }
     }  // end store_and_log_status
@@ -133,7 +142,7 @@ namespace irods::experimental::io::s3_transport
         {
             data_for_head_callback *data = (data_for_head_callback*)callback_data;
             store_and_log_status( status, error, __FUNCTION__, data->bucket_context,
-                    data->status, data->debug_flag );
+                    data->status );
         }
 
 
@@ -185,7 +194,7 @@ namespace irods::experimental::io::s3_transport
             {
                 upload_manager *data = (upload_manager*)callback_data;
                 store_and_log_status( status, error, __FUNCTION__, data->saved_bucket_context,
-                        data->status, data->debug_flag );
+                        data->status );
             } // end on_response_complete
 
         } // end namespace initialization_callback
@@ -223,7 +232,7 @@ namespace irods::experimental::io::s3_transport
             {
                 upload_manager *data = (upload_manager*)callback_data;
                 store_and_log_status( status, error, __FUNCTION__, data->saved_bucket_context,
-                        data->status, data->debug_flag );
+                        data->status );
                 // Don't change the global error, we may want to retry at a higher level.
                 // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
             } // end response_completion
@@ -251,7 +260,7 @@ namespace irods::experimental::io::s3_transport
                                       void *callback_data)
             {
                 store_and_log_status( status, error, __FUNCTION__, *g_response_completion_saved_bucket_context,
-                        g_response_completion_status, false );
+                        g_response_completion_status);
                 // Don't change the global error, we may want to retry at a higher level.
                 // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
             } // end response_completion
@@ -307,7 +316,7 @@ namespace irods::experimental::io::s3_transport
             {
                 upload_manager *data = (upload_manager*)callback_data;
                 store_and_log_status( status, error, __FUNCTION__, data->saved_bucket_context,
-                        data->status, data->debug_flag );
+                        data->status);
             } // end on_response_complete
 
         } // end namespace initialization_callback
@@ -345,7 +354,7 @@ namespace irods::experimental::io::s3_transport
             {
                 upload_manager *data = (upload_manager*)callback_data;
                 store_and_log_status( status, error, __FUNCTION__, data->saved_bucket_context,
-                        data->status, data->debug_flag );
+                        data->status );
                 // Don't change the global error, we may want to retry at a higher level.
                 // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
             } // end response_completion
@@ -373,7 +382,7 @@ namespace irods::experimental::io::s3_transport
                                       void *callback_data)
             {
                 store_and_log_status( status, error, __FUNCTION__, *g_response_completion_saved_bucket_context,
-                        g_response_completion_status, false );
+                        g_response_completion_status );
                 // Don't change the global error, we may want to retry at a higher level.
                 // The WorkerThread will note that status!=OK and act appropriately (retry or fail)
             } // end response_completion

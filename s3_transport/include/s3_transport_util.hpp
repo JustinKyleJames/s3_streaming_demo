@@ -66,8 +66,7 @@ namespace irods::experimental::io::s3_transport
                                const libs3_types::error_details *error,
                                const std::string& function,
                                const libs3_types::bucket_context& saved_bucket_context,
-                               libs3_types::status& pStatus,
-                               bool debug_flag);
+                               libs3_types::status& pStatus);
 
     // Returns timestamp in usec for delta-t comparisons
     auto get_time_in_microseconds() -> uint64_t;
@@ -103,7 +102,6 @@ namespace irods::experimental::io::s3_transport
         // TODO derive types
         uint64_t                 remaining;
         uint64_t                 offset;
-        bool                     debug_flag;
         libs3_types::status      status;            /* status returned by libs3 */
         std::string              object_key;
         std::string              shmem_key;
@@ -134,24 +132,21 @@ namespace irods::experimental::io::s3_transport
 
         libs3_types::bucket_context&
                             saved_bucket_context;   // To enable more detailed error messages
-        bool                debug_flag;
         unsigned int        thread_identifier;
     };
 
     struct data_for_head_callback
     {
-        data_for_head_callback(libs3_types::bucket_context& _bucket_context, bool _debug_flag = false)
+        data_for_head_callback(libs3_types::bucket_context& _bucket_context)
             : last_modified{0}
             , content_length{0}
             , status{libs3_types::status_ok}
-            , debug_flag{_debug_flag}
             , bucket_context{_bucket_context}
         {}
 
         time_t                             last_modified;
         uint64_t                           content_length;
         libs3_types::status                status;
-        bool                               debug_flag;
         libs3_types::bucket_context&       bucket_context;
     };
 
