@@ -528,7 +528,7 @@ void do_upload_thread(const std::string& bucket_name,
 
 
             upload_part(hostname.c_str(), bucket_name.c_str(), access_key.c_str(), secret_access_key.c_str(),
-                    filename.c_str(), object_prefix.c_str(), thread_count, thread_number, true, s3_signature_version_str,
+                    filename.c_str(), object_prefix.c_str(), thread_count, thread_number, thread_number > 0, s3_signature_version_str,
                     s3_protocol_str, s3_sts_date_str, false);
         });
     }
@@ -729,6 +729,26 @@ TEST_CASE("s3_transport_upload_multiple_thread_minimum_part_size", "[upload][thr
         int thread_count = 10;
         std::string filename = "medium_file";
         std::string object_prefix = "dir1/dir2/";
+        do_upload_thread(bucket_name, filename, object_prefix, keyfile, thread_count);
+    }
+}
+
+TEST_CASE("s3_transport_single_part", "[thread][upload][single_part]")
+{
+    rodsLogLevel(log_level);
+
+    int thread_count = 1;
+    std::string filename = "medium_file";
+    std::string object_prefix = "dir1/dir2/";
+
+    SECTION("upload zero length")
+    {
+        filename = "zero_file";
+        do_upload_thread(bucket_name, filename, object_prefix, keyfile, thread_count);
+    }
+
+    SECTION("upload smalle file single part")
+    {
         do_upload_thread(bucket_name, filename, object_prefix, keyfile, thread_count);
     }
 }
