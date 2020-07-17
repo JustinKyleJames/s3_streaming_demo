@@ -292,6 +292,13 @@ namespace irods::experimental::io::s3_transport
             //    use_cache_ = true;
             //}
 
+            // If the size == 0 and we were not using cache, the call to send() did not
+            // pass through transport.  Call send here
+            if (!use_cache_ && config_.object_size == 0) {
+                send("", 0);
+            }
+
+
             if ( !use_cache_ && is_full_upload() && config_.multipart_upload_flag ) {
 
                 // This was a full multipart upload, wait for the upload to complete
@@ -409,7 +416,6 @@ namespace irods::experimental::io::s3_transport
                 return 0;
             }*/
 
-
             thread_local std::ofstream tmp;
 
             if (use_cache_) {
@@ -441,8 +447,10 @@ namespace irods::experimental::io::s3_transport
                     __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(), _buffer_size);
 
             // if config_.part_size is 0 then bail
-            if (0 == config_.part_size) {
-                return 0;
+            if (config_.multipart_upload_flag && 0 == config_.part_size) {
+                rodsLog(LOG_ERROR, "%s:%d (%s) [[%u]] part size is zero\n", __FILE__, __LINE__,
+                        __FUNCTION__, get_thread_identifier());
+                    return 0;
             }
 
             // if we haven't already started an upload thread, start it
