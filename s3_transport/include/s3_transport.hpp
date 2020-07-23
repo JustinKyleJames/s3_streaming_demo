@@ -99,6 +99,7 @@ namespace irods::experimental::io::s3_transport
         uint64_t     minimum_part_size;
         static const uint64_t UNKNOWN_OBJECT_SIZE = 0;  // TODO use a negative number for this
         static const uint64_t DEFAULT_MINIMUM_PART_SIZE = 5*1024*1024;
+        int          debug_log_level = LOG_NOTICE;
     };
 
     template <typename CharT>
@@ -219,6 +220,15 @@ namespace irods::experimental::io::s3_transport
             if (put_props_.md5) free( (char*)put_props_.md5 );
         }
 
+        off_t get_offset() {
+            if (use_cache_) {
+                return cache_fstream_.tellg();
+            } else {
+                return file_offset_;
+            }
+
+        }
+
         bool object_exists_in_s3(uint64_t& object_size) {
 
             data_for_head_callback data(bucket_context_);
@@ -303,7 +313,7 @@ namespace irods::experimental::io::s3_transport
 
                 // This was a full multipart upload, wait for the upload to complete
 
-                rodsLog(LOG_DEBUG, "%s:%d (%s) [[%u]] wait for join of upload thread\n",
+                rodsLog(config_.debug_log_level, "%s:%d (%s) [[%u]] wait for join of upload thread\n",
                         __FILE__, __LINE__, __FUNCTION__, get_thread_identifier());
 
                 // upload was in background.  wait for it to complete.
@@ -312,7 +322,7 @@ namespace irods::experimental::io::s3_transport
                     begin_part_upload_thread_ptr_ = nullptr;
                 }
 
-                rodsLog(LOG_DEBUG, "%s:%d (%s) [[%u]] join for part\n",
+                rodsLog(config_.debug_log_level, "%s:%d (%s) [[%u]] join for part\n",
                         __FILE__, __LINE__, __FUNCTION__, get_thread_identifier());
             }
 
@@ -338,7 +348,7 @@ namespace irods::experimental::io::s3_transport
                     data.file_open_counter -= 1;
                 }
 
-                rodsLog(LOG_DEBUG, "%s:%d (%s) [[%u]] [last_file_to_close=%d]\n",
+                rodsLog(config_.debug_log_level, "%s:%d (%s) [[%u]] [last_file_to_close=%d]\n",
                         __FILE__, __LINE__, __FUNCTION__, this->get_thread_identifier(),
                         last_file_to_close);
 
@@ -401,9 +411,10 @@ namespace irods::experimental::io::s3_transport
             // just get what is asked for
             std::streamsize length = s3_download_part_worker_routine(_buffer, _buffer_size);
 
+
             // if we are not using cache file, update the read/write pointer
             if (!use_cache_) {
-                seekpos(length, std::ios_base::cur);
+                this->seekpos(static_cast<off_type>(length), std::ios_base::cur);
             }
 
             return length;
@@ -443,7 +454,7 @@ namespace irods::experimental::io::s3_transport
             buffer_type copied_buffer(_buffer, _buffer + _buffer_size);
             circular_buffer_.push_back({copied_buffer, false});
 
-            rodsLog(LOG_DEBUG, "%s:%d (%s) [[%u]] wrote buffer of size %ld\n",
+            rodsLog(config_.debug_log_level, "%s:%d (%s) [[%u]] wrote buffer of size %ld\n",
                     __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(), _buffer_size);
 
             // if config_.part_size is 0 then bail
@@ -636,21 +647,28 @@ namespace irods::experimental::io::s3_transport
                 uint64_t bytes_downloaded = 0;
                 std::mutex bytes_downloaded_mutex;
 
-                uint64_t part_size = s3_object_size / config_.number_of_transfer_threads;
+                // determine number of download threads.
+                //  max = config_.number_of_transfer_threads
+                //  start at 1 and add one per 1M
+                uint64_t cutoff_per_thread = 1024*1024;
+                uint64_t number_of_transfer_threads = s3_object_size / cutoff_per_thread + 1;
+                number_of_transfer_threads = number_of_transfer_threads > config_.number_of_transfer_threads ? config_.number_of_transfer_threads : number_of_transfer_threads;
 
-                irods::thread_pool threads{static_cast<int>(config_.number_of_transfer_threads)};
+                uint64_t part_size = s3_object_size / number_of_transfer_threads;
 
-                for (unsigned int thr_id= 0; thr_id < config_.number_of_transfer_threads; ++thr_id) {
+                irods::thread_pool threads{static_cast<int>(number_of_transfer_threads)};
 
-                    irods::thread_pool::post(threads, [this, thr_id, part_size, s3_object_size,
+                for (unsigned int thr_id= 0; thr_id < number_of_transfer_threads; ++thr_id) {
+
+                    irods::thread_pool::post(threads, [this, thr_id, part_size, s3_object_size, number_of_transfer_threads,
                             &bytes_downloaded, &bytes_downloaded_mutex] () {
 
                             off_t this_part_offset = part_size * thr_id;
                             uint64_t this_part_size;
 
-                            if (thr_id == config_.number_of_transfer_threads - 1) {
+                            if (thr_id == number_of_transfer_threads - 1) {
                                 this_part_size = part_size + (s3_object_size -
-                                        part_size * config_.number_of_transfer_threads);
+                                        part_size * number_of_transfer_threads);
                             } else {
                                 this_part_size = part_size;
                             }
@@ -691,7 +709,7 @@ namespace irods::experimental::io::s3_transport
 
         error_codes flush_cache_file(named_shared_memory_object& shm_obj) {
 
-            rodsLog(LOG_DEBUG, "%s:%d (%s) [[%u]] Flushing cache file.\n",
+            rodsLog(config_.debug_log_level, "%s:%d (%s) [[%u]] Flushing cache file.\n",
                     __FILE__, __LINE__, __FUNCTION__, get_thread_identifier());
 
             error_codes return_value = error_codes::SUCCESS;
@@ -858,7 +876,8 @@ namespace irods::experimental::io::s3_transport
             namespace types = shared_data::interprocess_types;
             namespace bf = boost::filesystem;
 
-            rodsLog(LOG_DEBUG, "%s:%d (%s) [[%u]] [_mode & in = %d][_mode & out = %d]"
+            //rodsLog(config_.debug_log_level, "%s:%d (%s) [[%u]] [_mode & in = %d][_mode & out = %d]"
+            printf("%s:%d (%s) [[%u]] [_mode & in = %d][_mode & out = %d]"
                 "[_mode & trunc = %d][_mode & app = %d][_mode & ate = %d]"
                 "[_mode & binary = %d]\n",
                 __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(),
@@ -885,7 +904,7 @@ namespace irods::experimental::io::s3_transport
                 use_cache_ = true;
             }
 
-            rodsLog(LOG_DEBUG, "%s:%d (%s) [[%u]] [object_key_ = %s][config_.multipart_upload_flag = %d][use_cache_ = %d]"
+            rodsLog(config_.debug_log_level, "%s:%d (%s) [[%u]] [object_key_ = %s][config_.multipart_upload_flag = %d][use_cache_ = %d]"
                 "[download_to_cache_ = %d]\n",
                 __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(),
                 object_key_.c_str(),
@@ -1076,13 +1095,13 @@ namespace irods::experimental::io::s3_transport
                         s3_multipart_upload::initialization_callback::on_response };
 
                 do {
-                    rodsLog(LOG_DEBUG, "%s:%d (%s) [[%u]] call S3_initiate_multipart [object_key=%s]\n",
+                    rodsLog(config_.debug_log_level, "%s:%d (%s) [[%u]] call S3_initiate_multipart [object_key=%s]\n",
                             __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(), object_key_.c_str());
 
                     S3_initiate_multipart(&bucket_context_, object_key_.c_str(),
                             &put_props_, &mpu_initial_handler, nullptr, &upload_manager_);
 
-                    rodsLog(LOG_DEBUG, "%s:%d (%s) [[%u]] [manager.status=%s]\n", __FILE__, __LINE__,
+                    rodsLog(config_.debug_log_level, "%s:%d (%s) [[%u]] [manager.status=%s]\n", __FILE__, __LINE__,
                             __FUNCTION__, get_thread_identifier(), S3_get_status_name(upload_manager_.status));
 
                     if (upload_manager_.status != libs3_types::status_ok) {
@@ -1097,7 +1116,7 @@ namespace irods::experimental::io::s3_transport
                     return error_codes::INITIATE_MULTIPART_UPLOAD_ERROR;
                 }
 
-                rodsLog(LOG_DEBUG, "%s:%d (%s) [[%u]] S3_initiate_multipart returned.  Upload ID = %s\n",
+                rodsLog(config_.debug_log_level, "%s:%d (%s) [[%u]] S3_initiate_multipart returned.  Upload ID = %s\n",
                         __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(),
                         data.upload_id.c_str());
 
@@ -1136,7 +1155,7 @@ namespace irods::experimental::io::s3_transport
 
             msg << "Cancelling multipart upload: key=\""
                 << object_key_ << "\", upload_id=\"" << upload_id << "\"";
-            rodsLog(LOG_DEBUG,  "%s\n", msg.str().c_str() );
+            rodsLog(config_.debug_log_level,  "%s\n", msg.str().c_str() );
 
             s3_multipart_upload::cancel_callback::g_response_completion_status = libs3_types::status_ok;
             s3_multipart_upload::cancel_callback::g_response_completion_saved_bucket_context = &bucket_context_;
@@ -1151,7 +1170,7 @@ namespace irods::experimental::io::s3_transport
                 if (status >= 0) {
                     msg << " - \"" << S3_get_status_name(status) << "\"";
                 }
-                rodsLog(LOG_DEBUG,  "%s:%d (%s) [[%u]] %s\n", __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(),
+                rodsLog(config_.debug_log_level,  "%s:%d (%s) [[%u]] %s\n", __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(),
                         msg.str().c_str() );
             }
         } // end mpu_cancel
@@ -1182,7 +1201,7 @@ namespace irods::experimental::io::s3_transport
                     msg.str( std::string() ); // Clear
                     msg << "Multipart:  Completing key \"" << object_key_.c_str() << "\" Upload ID \""
                         << upload_id << "\"";
-                    rodsLog(LOG_DEBUG,  "%s:%d (%s) [[%u]] %s\n", __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(),
+                    rodsLog(config_.debug_log_level,  "%s:%d (%s) [[%u]] %s\n", __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(),
                             msg.str().c_str() );
 
                     uint64_t i;
@@ -1212,7 +1231,7 @@ namespace irods::experimental::io::s3_transport
                         S3_complete_multipart_upload(&bucket_context_, object_key_.c_str(),
                                 &commit_handler, upload_id.c_str(),
                                 upload_manager_.remaining, nullptr, &upload_manager_);
-                        rodsLog(LOG_DEBUG, "%s:%d (%s) [[%u]] [manager.status=%s]\n", __FILE__, __LINE__,
+                        rodsLog(config_.debug_log_level, "%s:%d (%s) [[%u]] [manager.status=%s]\n", __FILE__, __LINE__,
                                 __FUNCTION__, get_thread_identifier(), S3_get_status_name(upload_manager_.status));
                         if (upload_manager_.status != libs3_types::status_ok) s3_sleep( config_.retry_wait_seconds, 0 );
                     } while ((upload_manager_.status != libs3_types::status_ok) &&
@@ -1233,7 +1252,7 @@ namespace irods::experimental::io::s3_transport
                 if (error_codes::SUCCESS != data.last_error_code && "" != data.upload_id ) {
 
                     // Someone aborted after we started, delete the partial object on S3
-                    rodsLog(LOG_DEBUG, "Cancelling multipart upload\n");
+                    rodsLog(config_.debug_log_level, "Cancelling multipart upload\n");
                     mpu_cancel();
 
                     // Return the error
@@ -1328,7 +1347,7 @@ namespace irods::experimental::io::s3_transport
                 msg << "Multirange:  Start range key \"" << object_key_ << "\", offset "
                     << static_cast<long>(offset) << ", len "
                     << static_cast<int>(read_callback->content_length);
-                rodsLog(LOG_DEBUG, "%s:%d (%s) [[%u]] %s\n", __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(),
+                rodsLog(config_.debug_log_level, "%s:%d (%s) [[%u]] %s\n", __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(),
                         msg.str().c_str());
 
                 uint64_t start_microseconds = get_time_in_microseconds();
@@ -1340,7 +1359,7 @@ namespace irods::experimental::io::s3_transport
                 double bw = (read_callback->content_length / (1024.0*1024.0)) /
                     ( (end_microseconds - start_microseconds) / 1000000.0 );
                 msg << " -- END -- BW=" << bw << " MB/s";
-                rodsLog(LOG_DEBUG, "%s:%d (%s) [[%u]] %s\n", __FILE__, __LINE__, __FUNCTION__,
+                rodsLog(config_.debug_log_level, "%s:%d (%s) [[%u]] %s\n", __FILE__, __LINE__, __FUNCTION__,
                         get_thread_identifier(), msg.str().c_str());
 
                 if (read_callback->status != libs3_types::status_ok) s3_sleep( config_.retry_wait_seconds, 0 );
@@ -1355,7 +1374,7 @@ namespace irods::experimental::io::s3_transport
                 if (read_callback->status >= 0) {
                     msg << " - \"" << S3_get_status_name( read_callback->status ) << "\"";
                 }
-                rodsLog(LOG_DEBUG, "%s:%d (%s) [[%u]] %s\n", __FILE__, __LINE__, __FUNCTION__,
+                rodsLog(config_.debug_log_level, "%s:%d (%s) [[%u]] %s\n", __FILE__, __LINE__, __FUNCTION__,
                         get_thread_identifier(), msg.str().c_str());
             }
 
@@ -1372,8 +1391,7 @@ namespace irods::experimental::io::s3_transport
                 });
 
             }
-
-            return read_callback->bytes_read_from_s3;
+            return static_cast<std::streamsize>(read_callback->bytes_read_from_s3);
 
         } // end s3_download_part_worker_routine
 
@@ -1459,12 +1477,12 @@ namespace irods::experimental::io::s3_transport
                 upload_page<buffer_type> page;
 
                 // read the first page
-                rodsLog(LOG_DEBUG, "%s:%d (%s) [[%u]] waiting to read\n",
+                rodsLog(config_.debug_log_level, "%s:%d (%s) [[%u]] waiting to read\n",
                         __FILE__, __LINE__, __FUNCTION__, get_thread_identifier());
 
                 circular_buffer_.pop_front(page);
 
-                rodsLog(LOG_DEBUG, "%s:%d (%s) [[%u]] read page [buffer=%p][buffer_size=%lu][terminate_flag=%d]\n",
+                rodsLog(config_.debug_log_level, "%s:%d (%s) [[%u]] read page [buffer=%p][buffer_size=%lu][terminate_flag=%d]\n",
                         __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(), page.buffer.data(),
                         page.buffer.size(), page.terminate_flag);
 
@@ -1500,7 +1518,7 @@ namespace irods::experimental::io::s3_transport
                 });
 
                 if (resize_error) {
-                    rodsLog(LOG_DEBUG, "Error on reallocation of etags buffer in shared memory.");
+                    rodsLog(config_.debug_log_level, "Error on reallocation of etags buffer in shared memory.");
                     return;
                 }
             }
@@ -1523,7 +1541,7 @@ namespace irods::experimental::io::s3_transport
                 msg << "Multipart:  Start part " << static_cast<int>(write_callback->sequence) << ", key \""
                     << object_key_ << "\", uploadid \"" << upload_id
                     << "\", len " << static_cast<int>(write_callback->content_length);
-                rodsLog(LOG_DEBUG,  "%s:%d (%s) [[%u]] %s\n", __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(),
+                rodsLog(config_.debug_log_level,  "%s:%d (%s) [[%u]] %s\n", __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(),
                         msg.str().c_str() );
 
                 put_props_.md5 = nullptr;
@@ -1535,7 +1553,7 @@ namespace irods::experimental::io::s3_transport
                 //}
                 put_props_.expires = -1;
 
-                rodsLog(LOG_DEBUG, "%s:%d (%s) [[%u]] S3_upload_part (ctx, %s, props, handler, %lu, "
+                rodsLog(config_.debug_log_level, "%s:%d (%s) [[%u]] S3_upload_part (ctx, %s, props, handler, %lu, "
                        "uploadId, %lu, 0, partData)\n", __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(),
                        object_key_.c_str(), write_callback->sequence,
                        write_callback->content_length);
@@ -1544,14 +1562,14 @@ namespace irods::experimental::io::s3_transport
                         &put_object_handler, write_callback->sequence, upload_id.c_str(),
                         write_callback->content_length, 0, write_callback.get());
 
-                rodsLog(LOG_DEBUG, "%s:%d (%s) [[%u]] S3_upload_part returned [part=%lu][status=%s].\n",
+                rodsLog(config_.debug_log_level, "%s:%d (%s) [[%u]] S3_upload_part returned [part=%lu][status=%s].\n",
                         __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(), write_callback->sequence,
                         S3_get_status_name(write_callback->status));
 
                 msg.str(std::string());
                 msg.clear();
                 msg << "Multipart:  -- END -- BW=";// << bw << " MB/s";
-                rodsLog(LOG_DEBUG,  "%s:%d (%s) [[%u]] %s\n", __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(),
+                rodsLog(config_.debug_log_level,  "%s:%d (%s) [[%u]] %s\n", __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(),
                         msg.str().c_str() );
 
                 if (write_callback->status != libs3_types::status_ok) s3_sleep( config_.retry_wait_seconds, 0 );
@@ -1621,12 +1639,12 @@ namespace irods::experimental::io::s3_transport
                     upload_page<buffer_type> page;
 
                     // read the first page
-                    rodsLog(LOG_DEBUG, "%s:%d (%s) [[%u]] waiting to read\n",
+                    rodsLog(config_.debug_log_level, "%s:%d (%s) [[%u]] waiting to read\n",
                             __FILE__, __LINE__, __FUNCTION__, get_thread_identifier());
 
                     circular_buffer_.pop_front(page);
 
-                    rodsLog(LOG_DEBUG, "%s:%d (%s) [[%u]] read page [buffer=%p][buffer_size=%lu][terminate_flag=%d]\n",
+                    rodsLog(config_.debug_log_level, "%s:%d (%s) [[%u]] read page [buffer=%p][buffer_size=%lu][terminate_flag=%d]\n",
                             __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(), page.buffer.data(),
                             page.buffer.size(), page.terminate_flag);
 
@@ -1654,7 +1672,7 @@ namespace irods::experimental::io::s3_transport
                 //}
                 put_props_.expires = -1;
 
-                rodsLog(LOG_DEBUG, "%s:%d (%s) [[%u]] S3_put_object(ctx, %s, "
+                rodsLog(config_.debug_log_level, "%s:%d (%s) [[%u]] S3_put_object(ctx, %s, "
                        "%lu, put_props_, 0, &putObjectHandler, &data)\n",
                        __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(),
                        object_key_.c_str(),
@@ -1663,7 +1681,7 @@ namespace irods::experimental::io::s3_transport
                 S3_put_object(&bucket_context_, object_key_.c_str(), write_callback->content_length,
                         &put_props_, 0, &put_object_handler, write_callback.get());
 
-                rodsLog(LOG_DEBUG, "%s:%d (%s) [[%u]] S3_put_object returned [status=%s].\n",
+                rodsLog(config_.debug_log_level, "%s:%d (%s) [[%u]] S3_put_object returned [status=%s].\n",
                         __FILE__, __LINE__, __FUNCTION__, get_thread_identifier(),
                         S3_get_status_name(write_callback->status));
 
