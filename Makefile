@@ -23,6 +23,9 @@ read_bytes: read_bytes.cpp
 multipart_upload_libs3: multipart_upload_libs3.cpp circular_buffer.hpp
 	/opt/irods-externals/clang3.8-0/bin/clang++ multipart_upload_libs3.cpp -g -o multipart_upload_libs3 -std=c++14 -I/opt/irods-externals/jansson2.7-0/include -I/opt/irods-externals/boost1.60.0-0/include -I/opt/irods-externals/libs3a30e55e8-0/include -stdlib=libc++ -lboost_system -lcrypto -lz -lrt -ls3 -pthread -lc++abi -L/opt/irods-externals/boost1.60.0-0/lib/ -Wl,-rpath,/opt/irods-externals/clang-runtime3.8-0/lib -L/opt/irods-externals/libs3a30e55e8-0/lib -I/usr/include/irods -I/usr/include/libxml2 -Wl,-rpath,/opt/irods-externals/boost1.60.0-0/lib/ -Wl,-rpath,/opt/irods-externals/libs3a30e55e8-1/lib /opt/irods-externals/jansson2.7-0/lib/libjansson.a
 
+read_bytes_libs3: read_bytes_libs3.cpp
+	/opt/irods-externals/clang3.8-0/bin/clang++ read_bytes_libs3.cpp -g -o read_bytes_libs3 -std=c++14 -I/opt/irods-externals/libs359b62371-0/include -stdlib=libc++ -ls3 -lc++abi -Wl,-rpath,/opt/irods-externals/clang-runtime3.8-0/lib -L/opt/irods-externals/libs359b62371-0/lib -Wl,-rpath,/opt/irods-externals/libs359b62371-0/lib
+
 test: test.cpp s3_multipart_shared_data.hpp shared_memory_object.hpp
 	/opt/irods-externals/clang6.0-0/bin/clang++ test.cpp -g -o test -std=c++17 -I/opt/irods-externals/json3.1.2-0/include -I. -I/opt/irods-externals/jansson2.7-0/include -I/opt/irods-externals/boost1.67.0-0/include -I/opt/irods-externals/libs3a30e55e8-0/include -stdlib=libc++ -lboost_system -lboost_filesystem -lcrypto -lz -lrt -ls3 -pthread -lc++abi -L/opt/irods-externals/boost1.67.0-0/lib/ -Wl,-rpath,/opt/irods-externals/clang-runtime3.8-0/lib -L/opt/irods-externals/libs3a30e55e8-0/lib -I/usr/include/irods -I/usr/include/libxml2 -Wl,-rpath,/opt/irods-externals/boost1.67.0-0/lib/ -Wl,-rpath,/opt/irods-externals/libs3a30e55e8-1/lib /opt/irods-externals/jansson2.7-0/lib/libjansson.a -lirods_server -lirods_common
 
